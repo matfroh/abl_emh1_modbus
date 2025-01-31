@@ -1,0 +1,8 @@
+abl_emh1_modbus:
+  port: "/dev/ttyUSB0"
+  baudrate: 38400
+
+sensor:
+  - platform: abl_emh1_modbus
+    port: "/dev/ttyUSB0"
+    baudrate: 38400
