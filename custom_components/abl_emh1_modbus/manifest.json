@@ -1,6 +1,6 @@
 {
-    "domain": "evse_modbus",
-    "name": "EVSE Modbus",
+    "domain": "abl_emh1_modbus",
+    "name": "Eabl_emh1_modbus",
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
     "dependencies": [],
     "codeowners": [],
