@@ -5,7 +5,26 @@ Allows you to connect the ABL EMH1 charger over RS485 modbus connection to homea
 
 
 ## Installation
-Add the files to your /custom_components/ folder and restart home assistant
+Add the files to your /custom_components/ folder.
+Add to your configuration.yaml:
+```
+# add this to your configuration.yaml
+
+ev_charger_modbus:
+  port: /dev/ttyUSB0  # Adjust to your USB port
+  name: EV Charger    # Optional
+  slave: 1            # Optional
+  baudrate: 38400     # Optional
+
+logger:
+  default: info
+  logs:
+    custom_components.ev_charger_modbus: debug
+```
+
+and restart home assistant.
+
+
 You should now be able to 
 
 ## Test:
