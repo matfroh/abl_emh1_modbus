@@ -3,7 +3,7 @@
     "name": "EV Charger Modbus",
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
     "dependencies": [],
-    "codeowners": [@matfroh],
+    "codeowners": "@matfroh",
     "requirements": ["pyserial>=3.5"],
     "version": "1.0.0",
     "iot_class": "local_polling"
