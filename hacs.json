@@ -2,7 +2,7 @@
     "name": "EV Charger Modbus",
     "description": "Custom component for controlling ABL EMH1 charger with Modbus devices via Home Assistant.",
     "domain": "ev_charger_modbus",
-    "codeowners": ["@matfroh"],
+    "codeowners": "@matfroh",
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
     "issue_tracker": "https://github.com/matfroh/abl_emh1_modbus/issues",
     "requirements": [],
