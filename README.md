@@ -6,11 +6,20 @@ Allows you to connect the ABL EMH1 charger over RS485 modbus connection to homea
 
 ## Installation
 Add the files to your /custom_components/ folder.
-
-Edit your configuration.yaml it include the actviation of the service and some logging:
 ```
-# add this to your configuration.yaml
+config/
+└── custom_components/
+    └── ev_charger_modbus/
+        ├── __init__.py
+        ├── const.py
+        ├── manifest.json
+        ├── number.py
+        ├── modbus_device.py
+        └── services.yaml
+```
 
+Edit your configuration.yaml and include the actviation of the service and some logging:
+```
 ev_charger_modbus:
   port: /dev/ttyUSB0  # Adjust to your USB port
   name: EV Charger    # Optional
