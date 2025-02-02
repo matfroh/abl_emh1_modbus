@@ -1,9 +1,10 @@
 {
-    "name": "EV Charger Modbus",
-    "homeassistant": "2025.1.0",
-    "version": "1.0.0"
-    "zip_release": true,
-    "hide_default_branch": true,
-    "render_readme": true,
-    "hacs": "0.19.1"
+  "name": "EV Charger Modbus",
+  "homeassistant": "2025.1.0",
+  "version": "1.0.0",
+  "filename": "abl_emh1_modbus-main.zip",
+  "zip_release": true,
+  "hide_default_branch": true,
+  "render_readme": true,
+  "hacs": "0.19.1"
 }
