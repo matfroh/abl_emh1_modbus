@@ -11,4 +11,4 @@ You should now be able to
 ## Test:
 
 Find the service and send the update!
-![Alt text]([URL or file path](set_current.png))
+![Alt text](set_current.png)
