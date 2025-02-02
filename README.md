@@ -1,5 +1,7 @@
 # Home Assistant AddOn for ABL EMH1 charger over RS485 MODBUS
 
+NOT WORKING DO NOT USE
+
 Allows you to connect the ABL EMH1 charger over RS485 modbus connection to homeassistant
 UNDER DEVELOPMENT
 
