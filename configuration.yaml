@@ -1,8 +1,12 @@
-abl_emh1_modbus:
-  port: "/dev/ttyUSB0"
-  baudrate: 38400
+# add this to your configuration.yaml
 
-sensor:
-  - platform: abl_emh1_modbus
-    port: "/dev/ttyUSB0"
-    baudrate: 38400
+ev_charger_modbus:
+  port: /dev/ttyUSB0  # Adjust to your USB port
+  name: EV Charger    # Optional
+  slave: 1            # Optional
+  baudrate: 38400     # Optional
+
+logger:
+  default: info
+  logs:
+    custom_components.ev_charger_modbus: debug
