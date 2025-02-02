@@ -6,7 +6,8 @@ Allows you to connect the ABL EMH1 charger over RS485 modbus connection to homea
 
 ## Installation
 Add the files to your /custom_components/ folder.
-Add to your configuration.yaml:
+
+Edit your configuration.yaml it include the actviation of the service and some logging:
 ```
 # add this to your configuration.yaml
 
