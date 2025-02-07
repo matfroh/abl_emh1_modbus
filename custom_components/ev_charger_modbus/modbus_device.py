@@ -27,6 +27,26 @@ class ModbusASCIIDevice:
             _LOGGER.error(f"Failed to open serial port {port}: {str(e)}")
             raise
 
+    def send_raw_command(self, command: str) -> bool:
+        """Send a raw command to the device."""
+        try:
+            _LOGGER.debug(f"Sending raw command: {command}")
+            self.serial.write(command.encode())
+            response = self.serial.readline()
+            _LOGGER.debug(f"Received raw response: {response}")
+            return b'>01' in response
+        except Exception as e:
+            _LOGGER.error(f"Error sending raw command: {str(e)}")
+            return False
+
+    def enable_charging(self) -> bool:
+        """Enable charging."""
+        return self.send_raw_command(":01100005000102A1A1A5\r\n")
+
+    def disable_charging(self) -> bool:
+        """Disable charging."""
+        return self.send_raw_command(":01100005000102E0E027\r\n")
+
     def _calculate_lrc(self, message: bytes) -> int:
         """Calculate LRC for Modbus ASCII message."""
         lrc = 0
@@ -39,12 +59,16 @@ class ModbusASCIIDevice:
     def write_current(self, current: int) -> bool:
         """Write the maximum current setting."""
         try:
+            if current == 0:
+                # Special command for 0 amperes
+                return self.send_raw_command(":0110001400010203E8ED\r\n")
+            
             if not 5 <= current <= 16:
-                _LOGGER.error(f"Current value {current}A is outside valid range (5-16A)")
+                _LOGGER.error(f"Current value {current}A is outside valid range (0 or 5-16A)")
                 return False
-                
+            
             # Convert current to duty cycle value (current * 16.6)
-            duty_cycle = int(current * 16.6)  # This will give us the correct value (e.g., 166 for 10A)
+            duty_cycle = int(current * 16.6)
             _LOGGER.debug(f"Converting {current}A to duty cycle: {duty_cycle} (0x{duty_cycle:04X})")
             
             # Construct message bytes
@@ -80,42 +104,70 @@ class ModbusASCIIDevice:
             _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
             return False
 
-    def read_current(self) -> Optional[float]:
-        """Read the EV current."""
+    def read_current(self) -> Optional[list]:
+        """Read the EV state and current values."""
         try:
-            # Command to read current (0x03 function, register 0x0033, 3 registers)
+            # Command to read registers
             message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
             _LOGGER.debug(f"Reading current with raw message: {message.hex().upper()}")
-            
+        
             # Calculate LRC and format message
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            
             _LOGGER.debug(f"Sending message: {formatted_message}")
-            
+        
             self.serial.write(formatted_message)
             response = self.serial.readline()
-            
+        
             _LOGGER.debug(f"Received raw response: {response}")
-            
-            if response:
-                try:
-                    # Response format: >0103063380C30A0A00EC
-                    # Current value is at position 12-13 (0A in the example = 10A)
-                    current_hex = response[12:14]
-                    current = int(current_hex, 16)
-                    _LOGGER.debug(f"Parsed current value: {current}A from hex: {current_hex}")
-                    return current
-                except (IndexError, ValueError) as e:
-                    _LOGGER.error(f"Failed to parse response: {response}, Error: {str(e)}")
-                    return None
-            else:
-                _LOGGER.error("No response received from device")
+        
+            # Validate and parse the response
+            if not response or len(response) < 13:  # Minimum valid response length
+                _LOGGER.error(f"Invalid or incomplete response received: {response}")
                 return None
-                
+        
+            try:
+                # Ensure the response starts with ">01"
+                if not response.startswith(b'>01'):
+                    _LOGGER.error(f"Unexpected response format: {response}")
+                    return None
+            
+                # Extract and parse register values
+                registers = [
+                    int(response[6:8], 16),  # State code
+                    int(response[8:12], 16),  # Max current
+                    int(response[12:16], 16),  # ICT1
+                    int(response[16:20], 16),  # ICT2
+                    int(response[20:24], 16),  # ICT3
+                ]
+                _LOGGER.debug(f"Parsed registers: {registers}")
+                return registers
+        
+            except (IndexError, ValueError) as e:
+                _LOGGER.error(f"Failed to parse response: {response}, Error: {e}")
+                return None
         except Exception as e:
-            _LOGGER.error(f"Error reading current: {str(e)}, type: {type(e)}")
+            _LOGGER.error(f"Error reading current: {e}")
             return None
+    
+    def is_charging_enabled(self) -> bool:
+        """Check if charging is enabled."""
+        try:
+            # Read relevant register(s) to determine the charging state
+            # For example, use the state register (registers[0]) or another value
+            registers = self.read_current()  # Reuse the read_current logic
+            if not registers:
+                _LOGGER.error("Failed to read registers for charging state.")
+                return False
+        
+            state_code = registers[0]
+            _LOGGER.debug(f"State code read: {state_code}")
+        
+            # Example: Return True for states indicating active charging
+            return state_code in ["B1", "B2", "C2"]
+        except Exception as e:
+            _LOGGER.error(f"Error checking charging state: {e}")
+            return False
 
     def __del__(self):
         """Clean up serial connection."""

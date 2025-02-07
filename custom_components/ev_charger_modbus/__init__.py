@@ -21,12 +21,12 @@ from .modbus_device import ModbusASCIIDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [Platform.NUMBER]
+PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 
 SET_CURRENT_SCHEMA = vol.Schema({
     vol.Required("current"): vol.All(
         vol.Coerce(int),
-        vol.Range(min=5, max=16)
+        vol.Range(min=0, max=16)
     )
 })
 
@@ -99,4 +99,3 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-

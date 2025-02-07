@@ -38,7 +38,7 @@ class EVChargerNumber(NumberEntity):
         self._device = device
         self._attr_name = f"{name} Current"
         self._attr_unique_id = f"{name.lower()}_current"
-        self._attr_native_min_value = 5
+        self._attr_native_min_value = 0
         self._attr_native_max_value = 16
         self._attr_native_step = 1
         self._attr_native_unit_of_measurement = "A"
