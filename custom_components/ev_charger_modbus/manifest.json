@@ -1,6 +1,6 @@
 {
-    "domain": "ev_charger_modbus_local",
-    "name": "EV Charger Modbus local",
+    "domain": "ev_charger_modbus",
+    "name": "ABL EMH1 EV Charger Modbus",
     "config_flow": true,
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
     "dependencies": ["sensor"],
