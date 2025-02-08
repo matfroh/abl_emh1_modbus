@@ -42,4 +42,10 @@ You should now be able to
 ## Test:
 
 Find the service and send the update!
-![Alt text](set_current.png)
+Select either 0 Amps or any value between 5 and 16
+![Set the current in actions](set_current.png)
+
+A switch has been created and can be found in the entities. This enables disabling the charger or enable the charger if it was previously disabled.
+The switch scans the state of the charger to be in the right position.
+Disabling the charger and setting to 0 amperes has some nuances where depending on your use case, one is better fitted.
+![Set the current in actions](switch.png)
