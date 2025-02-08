@@ -55,43 +55,78 @@ class EVChargerSwitch(SwitchEntity):
 
     def __init__(self, device, name):
         """Initialize the switch."""
+        _LOGGER.info("Initializing EVChargerSwitch with name: %s", name)
         self._device = device
         self._attr_name = f"{name} Charging Enable"
         self._attr_unique_id = f"{DOMAIN}_{name.lower()}_charging_enable"
-        self._attr_is_on = False  # Default state
+        self._attr_is_on = False
+        self._state_description = "Unknown"
+        _LOGGER.debug("Switch initialized with name: %s, unique_id: %s", self._attr_name, self._attr_unique_id)
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
+    @property
+    def extra_state_attributes(self):
+        """Return the state attributes."""
+        _LOGGER.debug("Getting extra state attributes: %s", {"state_description": self._state_description})
+        return {
+            "state_description": self._state_description
+        }
+
+    async def async_turn_on(self, **kwargs):
         """Turn on charging."""
+        _LOGGER.info("Attempting to turn on charging")
         try:
             success = await self.hass.async_add_executor_job(self._device.enable_charging)
             if success:
                 self._attr_is_on = True
-                self.async_write_ha_state()
-                _LOGGER.info("Charging enabled")
+                _LOGGER.info("Successfully enabled charging")
             else:
                 _LOGGER.error("Failed to enable charging")
         except Exception as e:
-            _LOGGER.error("Error enabling charging: %s", e)
+            _LOGGER.exception("Error enabling charging: %s", e)
 
-    async def async_turn_off(self, **kwargs: Any) -> None:
+    async def async_turn_off(self, **kwargs):
         """Turn off charging."""
+        _LOGGER.info("Attempting to turn off charging")
         try:
             success = await self.hass.async_add_executor_job(self._device.disable_charging)
             if success:
                 self._attr_is_on = False
-                self.async_write_ha_state()
-                _LOGGER.info("Charging disabled")
+                _LOGGER.info("Successfully disabled charging")
             else:
                 _LOGGER.error("Failed to disable charging")
         except Exception as e:
-            _LOGGER.error("Error disabling charging: %s", e)
-
+            _LOGGER.exception("Error disabling charging: %s", e)
 
     async def async_update(self) -> None:
-        """Update the switch state."""
+        """Update the switch state based on the charging state."""
+        _LOGGER.debug("Starting async_update()")
         try:
-            self._attr_is_on = await self.hass.async_add_executor_job(self._device.is_charging_enabled)
-            self.async_write_ha_state()
-            _LOGGER.debug(f"Updated charging state to: {'ON' if self._attr_is_on else 'OFF'}")
+            # Update the device state first
+            _LOGGER.debug("Calling device.update_state()")
+            await self.hass.async_add_executor_job(self._device.update_state)
+            
+            # Get the current state code from the device
+            state_code = self._device.state_code
+            _LOGGER.debug("Retrieved state_code: 0x%02X", state_code if state_code is not None else 0)
+            
+            # Update the state description
+            self._state_description = self._device.state_description
+            _LOGGER.debug("Updated state_description: %s", self._state_description)
+            
+            # Update switch state based on state code
+            old_state = self._attr_is_on
+            if state_code is None or state_code in [0xE0, 0xE2]:
+                self._attr_is_on = False
+            else:
+                self._attr_is_on = True
+
+            _LOGGER.info(
+                "Switch state updated - Old: %s, New: %s, State code: 0x%02X, Description: %s",
+                old_state,
+                self._attr_is_on,
+                state_code if state_code is not None else 0,
+                self._state_description
+            )
+            
         except Exception as ex:
-            _LOGGER.error("Error updating switch state: %s", ex)
+            _LOGGER.exception("Error updating switch state: %s", ex)

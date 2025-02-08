@@ -1,95 +1,162 @@
-"""Support for ABL EMH1 Modbus sensors."""
+"""Sensor platform for EV Charger Modbus."""
 import logging
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.const import UnitOfElectricCurrent
+from typing import Optional
+
+import voluptuous as vol
+
+from homeassistant.components.sensor import (
+    SensorEntity,
+    SensorDeviceClass,
+    SensorStateClass,
+)
+from homeassistant.const import (
+    CONF_NAME,
+    UnitOfElectricCurrent,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+
 from .const import DOMAIN
-from .modbus_device import ModbusASCIIDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-# Mapping of state codes to descriptions
-STATE_DESCRIPTIONS = {
-    "A1": "Waiting for EV",
-    "B1": "EV is asking for charging",
-    "B2": "EV has the permission to charge",
-    "C2": "EV is charged",
-    "C3": "EV is charged, reduced current (error F16, F17)",
-    "C4": "EV is charged, reduced current (imbalance F15)",
-    "E0": "Outlet disabled",
-    "E1": "Production test",
-    "E2": "EVCC setup mode",
-    "E3": "Bus idle",
-    "F1": "Unintended closed contact (Welding)",
-    "F2": "Internal error",
-    "F3": "DC residual current detected",
-    "F4": "Upstream communication timeout",
-    "F5": "Lock of socket failed",
-    "F6": "CS out of range",
-    "F7": "State D requested by EV",
-    "F8": "CP out of range",
-    "F9": "Overcurrent detected",
-    "F10": "Temperature outside limits",
-    "F11": "Unintended opened contact",
-}
+PLATFORM_SCHEMA = vol.Schema({
+    vol.Required(CONF_NAME): cv.string,
+})
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the ABL EMH1 Modbus sensors."""
-    if discovery_info is None:
+async def async_setup_platform(
+    hass: HomeAssistant,
+    config: dict,
+    async_add_entities: AddEntitiesCallback,
+    discovery_info: Optional[dict] = None,
+) -> None:
+    """Set up the EV Charger sensor platform."""
+    name = config[CONF_NAME]
+    device = hass.data.get(DOMAIN, {}).get("device")
+
+    if not device:
+        _LOGGER.error("Device not initialized in hass.data[%s]", DOMAIN)
         return
 
-    # Retrieve configuration from hass
-    port = hass.data[DOMAIN]["port"]
-    baudrate = hass.data[DOMAIN]["baudrate"]
+    sensors = [
+        EVChargerStateSensor(device, name),
+        EVChargerMaxCurrentSensor(device, name),
+        EVChargerCurrent1Sensor(device, name),
+        EVChargerCurrent2Sensor(device, name),
+        EVChargerCurrent3Sensor(device, name),
+    ]
+    async_add_entities(sensors)
 
-    # Create ModbusASCIIDevice instance
-    try:
-        modbus_device = ModbusASCIIDevice(port=port, baudrate=baudrate)
-    except Exception as e:
-        _LOGGER.error(f"Failed to initialize Modbus device: {e}")
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up the EV Charger sensor platform from a config entry."""
+    device = hass.data.get(DOMAIN, {}).get("device")
+    name = config_entry.data[CONF_NAME]
+
+    if not device:
+        _LOGGER.error("Device not initialized in hass.data[%s]", DOMAIN)
         return
 
-    # Add sensor entities
-    async_add_entities([ABLEmh1CurrentSensor(modbus_device)], True)
+    sensors = [
+        EVChargerStateSensor(device, name),
+        EVChargerMaxCurrentSensor(device, name),
+        EVChargerCurrent1Sensor(device, name),
+        EVChargerCurrent2Sensor(device, name),
+        EVChargerCurrent3Sensor(device, name),
+    ]
+    async_add_entities(sensors)
 
+class EVChargerBaseSensor(SensorEntity):
+    """Base class for EV Charger sensors."""
 
-class ABLEmh1CurrentSensor(SensorEntity):
-    """Representation of an ABL EMH1 Current Sensor."""
-
-    def __init__(self, modbus_device):
+    def __init__(self, device, name: str, sensor_type: str):
         """Initialize the sensor."""
-        self._modbus_device = modbus_device
-        self._attr_name = "ABL EMH1 Current"
-        self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
-        self._attr_unique_id = "abl_emh1_current"
-        self._state_data = None
+        self._device = device
+        self._attr_name = f"{name} {sensor_type}"
+        self._attr_unique_id = f"{DOMAIN}_{name.lower()}_{sensor_type.lower().replace(' ', '_')}"
+        self._state = None
 
-    async def async_update(self):
-        """Fetch new state data for the sensor."""
+    async def async_update(self) -> None:
+        """Update the sensor."""
         try:
-            registers = await self.hass.async_add_executor_job(self._modbus_device.read_current)
-            if registers:
-                # Decode state code
-                state_code = registers[0]
-                state_description = STATE_DESCRIPTIONS.get(state_code, "Unknown state")
-
-                # Decode other registers
-                values = {
-                    "state_code": state_code,
-                    "state_description": state_description,
-                    "max_current": registers[1],  # Max current in amperes
-                    "ict1": registers[2],         # Current on ICT1 in amperes
-                    "ict2": registers[3],         # Current on ICT2 in amperes
-                    "ict3": registers[4],         # Current on ICT3 in amperes
-                }
-
-                self._state_data = values
-                self._attr_native_value = values["ict1"]  # Default to ICT1 as the primary value
-            else:
-                _LOGGER.warning("Failed to read registers from Modbus device.")
+            await self.hass.async_add_executor_job(self._device.update_state)
+            values = await self.hass.async_add_executor_job(self._device.read_current)
+            if values:
+                self._update_from_values(values)
         except Exception as e:
-            _LOGGER.error(f"Error updating sensor: {e}")
+            _LOGGER.error("Error updating sensor %s: %s", self._attr_name, str(e))
 
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        return self._state_data
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        raise NotImplementedError
+
+class EVChargerStateSensor(EVChargerBaseSensor):
+    """Sensor for EV Charger state."""
+
+    def __init__(self, device, name: str):
+        """Initialize the sensor."""
+        super().__init__(device, name, "State")
+
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        self._attr_native_value = values.get('state_description')
+
+class EVChargerMaxCurrentSensor(EVChargerBaseSensor):
+    """Sensor for EV Charger maximum current."""
+
+    def __init__(self, device, name: str):
+        """Initialize the sensor."""
+        super().__init__(device, name, "Max Current")
+        self._attr_device_class = SensorDeviceClass.CURRENT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        self._attr_native_value = values.get('max_current')
+
+class EVChargerCurrent1Sensor(EVChargerBaseSensor):
+    """Sensor for EV Charger current 1."""
+
+    def __init__(self, device, name: str):
+        """Initialize the sensor."""
+        super().__init__(device, name, "Current 1")
+        self._attr_device_class = SensorDeviceClass.CURRENT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        self._attr_native_value = values.get('ict1')
+
+class EVChargerCurrent2Sensor(EVChargerBaseSensor):
+    """Sensor for EV Charger current 2."""
+
+    def __init__(self, device, name: str):
+        """Initialize the sensor."""
+        super().__init__(device, name, "Current 2")
+        self._attr_device_class = SensorDeviceClass.CURRENT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        self._attr_native_value = values.get('ict2')
+
+class EVChargerCurrent3Sensor(EVChargerBaseSensor):
+    """Sensor for EV Charger current 3."""
+
+    def __init__(self, device, name: str):
+        """Initialize the sensor."""
+        super().__init__(device, name, "Current 3")
+        self._attr_device_class = SensorDeviceClass.CURRENT
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
+
+    def _update_from_values(self, values: dict) -> None:
+        """Update state from values dictionary."""
+        self._attr_native_value = values.get('ict3')

@@ -2,7 +2,7 @@
     "domain": "ev_charger_modbus",
     "name": "EV Charger Modbus",
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
-    "dependencies": [],
+    "dependencies": ["sensor"],
     "codeowners": [],
     "requirements": ["pyserial>=3.5"],
     "version": "1.0.0",
