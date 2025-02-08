@@ -1,10 +1,10 @@
 {
     "domain": "ev_charger_modbus",
-    "name": "EV Charger Modbus",
+    "name": "ABL EMH1 EV Charger Modbus",
+    "config_flow": true,
     "documentation": "https://github.com/matfroh/abl_emh1_modbus",
-    "issue_tracker": "https://github.com/matfroh/abl_emh1_modbus/issues",
-    "dependencies": [],
-    "codeowners": ["@matfroh"],
+    "dependencies": ["sensor"],
+    "codeowners": [],
     "requirements": ["pyserial>=3.5"],
     "version": "1.0.0",
     "iot_class": "local_polling"
