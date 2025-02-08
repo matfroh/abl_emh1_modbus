@@ -16,6 +16,8 @@ config/
         ├── number.py
         ├── modbus_device.py
         └── services.yaml
+needs update depending on DEV
+
 ```
 
 Edit your configuration.yaml and include the actviation of the service and some logging:
