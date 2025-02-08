@@ -1,14 +1,16 @@
-# custom_components/ev_charger_modbus/__init__.py
+# __init__.py
 """The EV Charger Modbus integration."""
 import logging
 from typing import Any
+from datetime import timedelta
 
 import voluptuous as vol
+import async_timeout
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_PORT, CONF_SLAVE, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     DOMAIN,
@@ -30,44 +32,58 @@ SET_CURRENT_SCHEMA = vol.Schema({
     )
 })
 
-CONFIG_SCHEMA = vol.Schema(
-    {
-        DOMAIN: vol.Schema(
-            {
-                vol.Required(CONF_PORT): cv.string,
-                vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-                vol.Optional(CONF_SLAVE, default=DEFAULT_SLAVE): cv.positive_int,
-                vol.Optional(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): cv.positive_int,
-            }
-        )
-    },
-    extra=vol.ALLOW_EXTRA,
-)
-
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
-    """Set up the EV Charger component."""
-    if DOMAIN not in config:
-        return True
+    """Set up the EV Charger Modbus component."""
+    return True
 
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    conf = config[DOMAIN]
+ 
+    hass.data[DOMAIN][entry.entry_id] = {
+        "device": None,  # Placeholder, will be set after connecting to the device
+    }
+ 
     
     # Create ModbusASCIIDevice instance
     device = ModbusASCIIDevice(
-        port=conf[CONF_PORT],
-        slave_id=conf.get(CONF_SLAVE, DEFAULT_SLAVE),
-        baudrate=conf.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
+        port=entry.data[CONF_PORT],
+        slave_id=entry.data.get(CONF_SLAVE, DEFAULT_SLAVE),
+        baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
     )
+
+    #hass.data[DOMAIN][entry.entry_id]["device"] = device
+
+
+    async def async_update_data():
+        """Fetch data from API endpoint."""
+        async with async_timeout.timeout(10):
+            # Your data fetch implementation here
+            # Example:
+            return await hass.async_add_executor_job(device.read_all_data)
+
+    coordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=DOMAIN,
+        update_method=async_update_data,
+        update_interval=timedelta(seconds=30)  # Update every 30 seconds
+    )
+
+    # Initial data fetch
+    await coordinator.async_config_entry_first_refresh()
     
-    hass.data[DOMAIN] = {
+    # Store the device instance and coordinator
+    hass.data[DOMAIN][entry.entry_id] = {
         "device": device,
-        CONF_NAME: conf.get(CONF_NAME, DEFAULT_NAME),
+        "coordinator": coordinator,
+        CONF_NAME: entry.data.get(CONF_NAME, DEFAULT_NAME),
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
         """Handle the service call."""
         current = call.data["current"]
-        device = hass.data[DOMAIN]["device"]
+        device = hass.data[DOMAIN][entry.entry_id]["device"]
         success = await hass.async_add_executor_job(device.write_current, current)
         
         if not success:
@@ -75,11 +91,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             return
         
         _LOGGER.info(f"Successfully set charging current to {current}A")
-        
-        # Update all number entities
-        for entity in hass.data[DOMAIN].get("entities", []):
-            entity._attr_native_value = current
-            entity.async_write_ha_state()
+        await coordinator.async_request_refresh()
 
     # Register the service
     hass.services.async_register(
@@ -89,13 +101,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         schema=SET_CURRENT_SCHEMA,
     )
 
-    return True
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up EV Charger from a config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        # Clean up device
+        device = hass.data[DOMAIN][entry.entry_id]["device"]
+        if device.serial.is_open:
+            device.serial.close()
+        hass.data[DOMAIN].pop(entry.entry_id)
+
+    return unload_ok

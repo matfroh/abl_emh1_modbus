@@ -2,53 +2,46 @@
 import logging
 from typing import Any, Optional
 
-import voluptuous as vol
-
-from homeassistant.components.switch import PLATFORM_SCHEMA, SwitchEntity
+from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Platform schema for YAML configuration
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_NAME): cv.string,
-})
-
-async def async_setup_platform(
-    hass: HomeAssistant,
-    config: dict,
-    async_add_entities: AddEntitiesCallback,
-    discovery_info: Optional[dict] = None,
-) -> None:
-    """Set up the EV Charger switch platform from YAML."""
-    name = config[CONF_NAME]
-    device = hass.data.get(DOMAIN, {}).get("device")
-
-    if not device:
-        _LOGGER.error("Device not initialized in hass.data[%s]", DOMAIN)
-        return
-
-    async_add_entities([EVChargerSwitch(device, name)])
-
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the EV Charger switch platform from a config entry."""
-    device = hass.data.get(DOMAIN, {}).get("device")
-    name = config_entry.data[CONF_NAME]
+    device = hass.data[DOMAIN][entry.entry_id]["device"]
+    name = entry.data[CONF_NAME]
 
     if not device:
-        _LOGGER.error("Device not initialized in hass.data[%s]", DOMAIN)
+        _LOGGER.error("Device not initialized in hass.data[%s][%s]", DOMAIN, entry.entry_id)
         return
 
     async_add_entities([EVChargerSwitch(device, name)])
+
+
+#async def async_setup_entry(
+#    hass: HomeAssistant,
+#    config_entry,
+#    async_add_entities: AddEntitiesCallback,
+#) -> None:
+    """Set up the EV Charger switch platform from a config entry."""
+#    device = hass.data.get(DOMAIN, {}).get("device")
+#    name = config_entry.data[CONF_NAME]
+
+#    if not device:
+#        _LOGGER.error("Device not initialized in hass.data[%s]", DOMAIN)
+#        return
+
+#    async_add_entities([EVChargerSwitch(device, name)])
 
 class EVChargerSwitch(SwitchEntity):
     """Switch for enabling/disabling EV charging."""
