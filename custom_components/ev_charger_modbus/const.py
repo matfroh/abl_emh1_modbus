@@ -2,7 +2,7 @@
 """Constants for the EV Charger Modbus integration."""
 from typing import Final
 
-DOMAIN: Final = "ev_charger_modbus"
+DOMAIN: Final = "ev_charger_modbus_local"
 
 CONF_SERIAL_PORT = "port"
 CONF_BAUDRATE = "baudrate"

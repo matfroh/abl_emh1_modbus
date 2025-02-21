@@ -3,15 +3,13 @@
 import logging
 from typing import Any
 from datetime import timedelta
-
 import voluptuous as vol
 import async_timeout
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME, CONF_PORT, CONF_SLAVE, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, CoordinatorEntity
+from homeassistant.helpers.entity import DeviceInfo
 from .const import (
     DOMAIN,
     CONF_BAUDRATE,
@@ -22,8 +20,25 @@ from .const import (
 from .modbus_device import ModbusASCIIDevice
 
 _LOGGER = logging.getLogger(__name__)
-
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
+
+# Add device specific constants
+MANUFACTURER = "ABL"
+MODEL = "eMH1"
+
+class EVChargerEntity(CoordinatorEntity):
+    """Base class for EV Charger entities."""
+
+    def __init__(self, coordinator: DataUpdateCoordinator, device_name: str) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, device_name)},
+            name=device_name,
+            manufacturer=MANUFACTURER,
+            model=MODEL,
+        )
+        self._attr_has_entity_name = True
 
 SET_CURRENT_SCHEMA = vol.Schema({
     vol.Required("current"): vol.All(
@@ -39,11 +54,6 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
- 
-    hass.data[DOMAIN][entry.entry_id] = {
-        "device": None,  # Placeholder, will be set after connecting to the device
-    }
- 
     
     # Create ModbusASCIIDevice instance
     device = ModbusASCIIDevice(
@@ -52,14 +62,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
     )
 
-    #hass.data[DOMAIN][entry.entry_id]["device"] = device
-
-
     async def async_update_data():
         """Fetch data from API endpoint."""
         async with async_timeout.timeout(10):
-            # Your data fetch implementation here
-            # Example:
             return await hass.async_add_executor_job(device.read_all_data)
 
     coordinator = DataUpdateCoordinator(
@@ -67,17 +72,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER,
         name=DOMAIN,
         update_method=async_update_data,
-        update_interval=timedelta(seconds=30)  # Update every 30 seconds
+        update_interval=timedelta(seconds=30)
     )
 
     # Initial data fetch
     await coordinator.async_config_entry_first_refresh()
     
+    device_name = entry.data.get(CONF_NAME, DEFAULT_NAME)
+    
     # Store the device instance and coordinator
     hass.data[DOMAIN][entry.entry_id] = {
         "device": device,
         "coordinator": coordinator,
-        CONF_NAME: entry.data.get(CONF_NAME, DEFAULT_NAME),
+        CONF_NAME: device_name,
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
@@ -112,5 +119,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if device.serial.is_open:
             device.serial.close()
         hass.data[DOMAIN].pop(entry.entry_id)
-
     return unload_ok

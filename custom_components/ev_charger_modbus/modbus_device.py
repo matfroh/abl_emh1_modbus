@@ -3,6 +3,7 @@ import logging
 from typing import Optional
 import serial
 from .constants import STATE_DESCRIPTIONS
+from math import ceil
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +73,47 @@ class ModbusASCIIDevice:
             _LOGGER.exception("Error updating state: %s", str(e))
             return False
 ##### start of new ######
+    def read_serial_number(self) -> Optional[str]:
+        """Read the device serial number."""
+        _LOGGER.debug("Starting read_serial_number()")
+        try:
+            if not self.serial or not self.serial.is_open:
+                _LOGGER.error("Serial port %s is not open", self.port)
+                return None
+
+        # Command to read serial number (0x0050)
+            message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
+            _LOGGER.debug("Reading serial number with raw message: %s", message.hex().upper())
+
+            lrc = self._calculate_lrc(message)
+            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+            _LOGGER.debug("Sending message: %s", formatted_message)
+
+            self.serial.write(formatted_message)
+            raw_response = self.serial.readline()
+            _LOGGER.debug("Raw response: %s", raw_response)
+
+            response = raw_response.decode(errors="replace").strip()
+            _LOGGER.debug("Decoded response: %s", response)
+
+            if not response.startswith(">") or len(response) < 13:
+                _LOGGER.error("Invalid or incomplete response: %s", response)
+                return None
+
+        # Extract the serial number from the response
+        # Remove the '>' prefix and the CRLF suffix
+            data = response[7:-2]  # Skip >0103xx header and LRC at end
+            serial_number = bytes.fromhex(data).decode('ascii')
+            _LOGGER.debug("Decoded serial number: %s", serial_number)
+
+            return serial_number
+
+        except Exception as e:
+            _LOGGER.exception("Error reading serial number: %s", str(e))
+            return None
+
+
+
 
     def read_all_data(self) -> dict[str, any]:
         """Read all available data from the device."""
@@ -116,6 +158,11 @@ class ModbusASCIIDevice:
                 "error": str(e)
             }
 ###### end of new ####
+    def adjust_current_value(self, value):
+        if value is None or value > 80:
+            return 0
+        return ceil(value)
+
 
     def read_current(self) -> Optional[dict]:
         """Read the EV state and current values."""
@@ -165,9 +212,10 @@ class ModbusASCIIDevice:
                 "state_code": state_code_hex,
                 "state_description": state_description,
                 "max_current": registers[0] / 10.0,
-                "ict1": registers[2] / 266.0 if len(registers) > 2 else None,
-                "ict2": registers[3] / 266.0 if len(registers) > 3 else None,
-                "ict3": registers[4] / 266.0 if len(registers) > 4 else None,
+                "ict1": self.adjust_current_value(registers[2] / 266.0) if len(registers) > 2 else None,
+                "ict2": self.adjust_current_value(registers[3] / 266.0) if len(registers) > 3 else None,
+                "ict3": self.adjust_current_value(registers[4] / 266.0) if len(registers) > 4 else None,
+
             }
 
             _LOGGER.info("Read current values: %s", values)
