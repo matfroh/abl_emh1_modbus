@@ -1,65 +1,64 @@
-import logging
+"""Number platform for EV Charger Modbus."""
 from homeassistant.components.number import NumberEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-
+from . import EVChargerEntity
 from .const import DOMAIN
 
+import logging
 _LOGGER = logging.getLogger(__name__)
 
-class EVChargerSlider(NumberEntity):
-    """Representation of the EV Charger current setting."""
+class EVChargerSlider(EVChargerEntity, NumberEntity):
+    """Slider for setting maximum charging current."""
 
-    def __init__(self, device, name):
-        """Initialize the number entity."""
+    def __init__(self, coordinator, device_name: str, device) -> None:
+        """Initialize the slider."""
+        super().__init__(coordinator, device_name)
         self._device = device
-        self._attr_name = f"{name} Charging Current"
-        self._attr_unique_id = f"{DOMAIN}_{name.lower()}_charging_current"
+        self._attr_name = f"{device_name} Charging Current"
+        self._attr_unique_id = f"{device_name}_charging_current"
         self._attr_native_min_value = 0
         self._attr_native_max_value = 16
         self._attr_native_step = 1
-        self._attr_native_unit_of_measurement = "A"
-        self._attr_native_value = 16  # Default value set to 16 (maximum allowed)
-        _LOGGER.debug("EVChargerSlider initialized with default value: %s", self._attr_native_value)
+        self._attr_native_value = 16  # Default value
+        _LOGGER.debug("Initialized slider with name: %s", self._attr_name)
 
-    async def async_update(self) -> None:
-        """Do nothing here since the value is updated when the service is called."""
-        _LOGGER.debug("Update skipped; current value set by service response.")
+    @property
+    def native_value(self) -> float:
+        """Return the current value."""
+        if self.coordinator.data is None:
+            return self._attr_native_value
+        return self.coordinator.data.get("charging_current", self._attr_native_value)
 
     async def async_set_native_value(self, value: float) -> None:
-        """Set a new charging current and parse the response."""
-        _LOGGER.info("Setting new charging current: %s A", value)
+        """Set new value."""
+        _LOGGER.debug("Setting charging current to: %s", value)
         try:
-            # Set charging current via the service call
-            response = await self.hass.async_add_executor_job(
+            success = await self.hass.async_add_executor_job(
                 self._device.write_current, int(value)
             )
-
-            # Parse the response to check for success/failure
-            if response.startswith(">011000140001DA"):  # Successful response
+            if success:
                 self._attr_native_value = value
-                _LOGGER.info("Successfully set charging current to %s A", value)
-            elif response.startswith(">0190046B"):  # Failure response
-                self._attr_native_value = 16  # Default to 16 if failed
-                _LOGGER.error("Failed to set charging current, response: %s", response)
+                _LOGGER.info("Successfully set charging current to %sA", value)
+                await self.coordinator.async_request_refresh()
             else:
-                self._attr_native_value = 16  # Default to 16 if unknown response
-                _LOGGER.error("Unknown response received: %s", response)
-
-        except Exception as ex:
-            _LOGGER.exception("Error while setting charging current: %s", ex)
-            self._attr_native_value = 16  # Default to 16 on error
+                _LOGGER.error("Failed to set charging current")
+        except Exception as e:
+            _LOGGER.exception("Error setting charging current: %s", e)
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the EV Charger number platform."""
-    device = hass.data[DOMAIN][entry.entry_id]["device"]  # Use 'entry' here
-    name = entry.data[CONF_NAME]
-   
-    entity = EVChargerSlider(device, name)
+    """Set up the EV Charger number platform from a config entry."""
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    device = hass.data[DOMAIN][entry.entry_id]["device"]
+    device_name = hass.data[DOMAIN][entry.entry_id][CONF_NAME]
+
+    _LOGGER.debug("Setting up number platform with device_name: %s", device_name)
+    
+    entity = EVChargerSlider(coordinator, device_name, device)
     async_add_entities([entity])
