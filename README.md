@@ -21,9 +21,10 @@ Add the files to your /custom_components/ folder or use the "+" in the integrati
 and restart home assistant.
 
 ## Usage:
-You should now be able to 
+You should now be able to have a new device in the integration. From there, you can set the charging rate to 0 or between 5 and 16 Amperes, read the current from the device and completely switch it off and on again.
+![device](device.png)
 
-## Test:
+## How to test:
 
 Find the service and send the update!
 Select either 0 Amps or any value between 5 and 16
