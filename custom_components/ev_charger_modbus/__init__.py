@@ -62,11 +62,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
     )
 
+    # Try to wake up the device first
+    await hass.async_add_executor_job(device.wake_up_device)
+
+
     async def async_update_data():
         """Fetch data from API endpoint."""
         async with async_timeout.timeout(10):
-            return await hass.async_add_executor_job(device.read_all_data)
-
+            # Try to wake up the device if needed before reading data
+            data = await hass.async_add_executor_job(device.read_all_data)
+            if data is None or not data.get("available", False):
+                _LOGGER.debug("Device seems unavailable, trying to wake it up")
+                await hass.async_add_executor_job(device.wake_up_device)
+                # Try reading data again after wake-up
+                data = await hass.async_add_executor_job(device.read_all_data)
+            return data
+            
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
@@ -94,6 +105,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Handle the service call."""
         current = call.data["current"]
         device = hass.data[DOMAIN][entry.entry_id]["device"]
+        # Try to wake up the device before setting current
+        await hass.async_add_executor_job(device.wake_up_device)
+  
+
         success = await hass.async_add_executor_job(device.write_current, current)
 
         if not success:

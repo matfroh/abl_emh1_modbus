@@ -47,6 +47,14 @@ class EVChargerModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     slave_id=user_input.get(CONF_SLAVE, DEFAULT_SLAVE),
                     baudrate=user_input.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
                 )
+                          
+                # First, try to wake up the device
+                _LOGGER.debug("Attempting to wake up the device...")
+                await self.hass.async_add_executor_job(device.wake_up_device)
+            
+                # Wait a moment for the device to fully wake up
+                import asyncio
+                await asyncio.sleep(1)                
                 
                 _LOGGER.debug("ModbusASCIIDevice initialized, attempting to read current...")
                 # Try to read values to verify connection

@@ -428,6 +428,38 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.error(f"Error calculating power consumption: {str(e)}")
             return None
+        
+    def wake_up_device(self) -> bool:
+        """Send wake-up sequence to the device."""
+        _LOGGER.info("Attempting to wake up device...")
+        
+        try:
+            if not self.serial or not self.serial.is_open:
+                _LOGGER.error("Serial port %s is not open", self.port)
+                return False
+            
+            # Send wake-up messages in sequence
+            wake_up_messages = [":000300010002FA\r\n", ":010300010002F9\r\n", ":010300010002F9\r\n"]
+            
+            for idx, message in enumerate(wake_up_messages):
+                _LOGGER.debug("Sending wake-up message %d: %s", idx + 1, message.strip())
+                self.serial.write(message.encode())
+                
+                # Small delay between messages
+                import time
+                time.sleep(0.5)
+                
+                # Read and discard any response
+                response = self.serial.readline()
+                _LOGGER.debug("Response to wake-up message %d: %s", idx + 1, response)
+            
+            _LOGGER.info("Wake-up sequence completed")
+            return True
+            
+        except Exception as e:
+            _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
+            return False
+            
             
     def __del__(self):
         """Clean up serial connection."""
