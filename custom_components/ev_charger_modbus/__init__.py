@@ -1,4 +1,3 @@
-# __init__.py
 """The EV Charger Modbus integration."""
 import logging
 from typing import Any
@@ -18,6 +17,8 @@ from .const import (
     DEFAULT_BAUDRATE,
 )
 from .modbus_device import ModbusASCIIDevice
+from datetime import datetime
+import asyncio
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
@@ -32,12 +33,27 @@ class EVChargerEntity(CoordinatorEntity):
     def __init__(self, coordinator: DataUpdateCoordinator, device_name: str) -> None:
         """Initialize the entity."""
         super().__init__(coordinator)
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, device_name)},
-            name=device_name,
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-        )
+        serial_number = getattr(coordinator, "serial_number", None)
+        firmware_version = getattr(coordinator, "firmware_version", None)
+        hardware_version = getattr(coordinator, "hardware_version", None)
+
+        device_info = {
+            "identifiers": {(DOMAIN, device_name)},
+            "name": device_name,
+            "manufacturer": MANUFACTURER,
+            "model": MODEL,
+        }
+
+        if serial_number and not all(c == '\uffff' for c in serial_number):
+            device_info["identifiers"].add((DOMAIN, serial_number))  # Add as an identifier instead
+    
+        if firmware_version:
+            device_info["sw_version"] = firmware_version
+    
+        if hardware_version:
+            device_info["hw_version"] = hardware_version
+
+        self._attr_device_info = DeviceInfo(**device_info)
         self._attr_has_entity_name = True
 
 SET_CURRENT_SCHEMA = vol.Schema({
@@ -47,6 +63,31 @@ SET_CURRENT_SCHEMA = vol.Schema({
     )
 })
 
+async def async_update_data(coordinator, device, device_info, hass):
+    """Fetch data from the device."""
+    now = datetime.now()
+    last_update = device_info.get("last_update", now)
+    if (now - last_update).days > 7:
+        _LOGGER.debug("Updating serial number and firmware info (weekly)")
+        updated_info = await hass.async_add_executor_job(lambda: {
+            "serial_number": device.read_serial_number(),
+            "firmware_info": device.read_firmware_info(),
+        })
+        if updated_info["serial_number"]:
+            coordinator.serial_number = updated_info["serial_number"]
+        if updated_info["firmware_info"]:
+            coordinator.firmware_info = updated_info["firmware_info"].get("firmware_version")
+            coordinator.hardware_version = updated_info["firmware_info"].get("hardware_version")
+        device_info["last_update"] = now
+
+    async with async_timeout.timeout(10):
+        data = await hass.async_add_executor_job(device.read_all_data)
+        if data is None or not data.get("available", False):
+            _LOGGER.debug("Device unavailable, trying wake-up")
+            await hass.async_add_executor_job(device.wake_up_device)
+            data = await hass.async_add_executor_job(device.read_all_data)
+        return data
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the EV Charger Modbus component."""
     return True
@@ -55,46 +96,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Create ModbusASCIIDevice instance
     device = ModbusASCIIDevice(
         port=entry.data[CONF_PORT],
         slave_id=entry.data.get(CONF_SLAVE, DEFAULT_SLAVE),
-        baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE)
+        baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
     )
 
-    # Try to wake up the device first
     await hass.async_add_executor_job(device.wake_up_device)
 
+    device_info = await hass.async_add_executor_job(lambda: {
+        "serial_number": device.read_serial_number(),
+        "firmware_info": device.read_firmware_info(),
+    })
 
-    async def async_update_data():
-        """Fetch data from API endpoint."""
-        async with async_timeout.timeout(10):
-            # Try to wake up the device if needed before reading data
-            data = await hass.async_add_executor_job(device.read_all_data)
-            if data is None or not data.get("available", False):
-                _LOGGER.debug("Device seems unavailable, trying to wake it up")
-                await hass.async_add_executor_job(device.wake_up_device)
-                # Try reading data again after wake-up
-                data = await hass.async_add_executor_job(device.read_all_data)
-            return data
-            
+    serial_number = device_info["serial_number"]
+    firmware_info = device_info["firmware_info"]
+
     coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
         name=DOMAIN,
-        update_method=async_update_data,
-        update_interval=timedelta(seconds=30)
+        update_method=lambda: async_update_data(coordinator, device, device_info, hass),
+        update_interval=timedelta(seconds=30),
     )
 
-    # Make the device available to the coordinator.
-    coordinator.device = device # <--- This is the added line
+    coordinator.device = device
+    coordinator.serial_number = serial_number if serial_number else None
+    coordinator.firmware_info = firmware_info  # Store the whole dictionary
+    coordinator.firmware_version = firmware_info.get("firmware_version") if firmware_info else None
+    coordinator.hardware_version = firmware_info.get("hardware_version") if firmware_info else None
 
-    # Initial data fetch
     await coordinator.async_config_entry_first_refresh()
 
     device_name = entry.data.get(CONF_NAME, DEFAULT_NAME)
-
-    # Store the device instance and coordinator
     hass.data[DOMAIN][entry.entry_id] = {
         "device": device,
         "coordinator": coordinator,
@@ -102,23 +136,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
-        """Handle the service call."""
+        """Handle service call to set charging current."""
         current = call.data["current"]
-        device = hass.data[DOMAIN][entry.entry_id]["device"]
-        # Try to wake up the device before setting current
         await hass.async_add_executor_job(device.wake_up_device)
-  
-
         success = await hass.async_add_executor_job(device.write_current, current)
-
         if not success:
             _LOGGER.error(f"Failed to set charging current to {current}A")
-            return
+        else:
+            _LOGGER.info(f"Charging current set to {current}A")
+            await coordinator.async_request_refresh()
 
-        _LOGGER.info(f"Successfully set charging current to {current}A")
-        await coordinator.async_request_refresh()
-
-    # Register the service
     hass.services.async_register(
         DOMAIN,
         "set_charging_current",
@@ -132,7 +159,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        # Clean up device
         device = hass.data[DOMAIN][entry.entry_id]["device"]
         if device.serial.is_open:
             device.serial.close()

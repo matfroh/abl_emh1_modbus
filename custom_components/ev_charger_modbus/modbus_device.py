@@ -459,6 +459,172 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
             return False
+
+    def read_firmware_info(self) -> Optional[dict]:
+        """Read the firmware version and hardware info."""
+        _LOGGER.debug("Starting read_firmware_info()")
+        try:
+            if not self.serial or not self.serial.is_open:
+                _LOGGER.error("Serial port %s is not open", self.port)
+                return None
+                
+            # Format the Modbus ASCII message for reading registers 0x0001-0x0002
+            device_id = format(self.slave_id, '02X')
+            function_code = "03"  # Read registers
+            register_address = "0001"  # Starting address
+            register_count = "0002"  # Number of registers to read
+            
+            # Build message without LRC
+            message_without_lrc = device_id + function_code + register_address + register_count
+            
+            # Calculate LRC
+            lrc = self._calculate_lrc_ascii(message_without_lrc)
+            
+            # Complete message
+            formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
+            
+            _LOGGER.debug("Sending message: %s", formatted_message)
+            self.serial.write(formatted_message)
+            
+            # Read response
+            raw_response = self.serial.readline()
+            _LOGGER.debug("Raw response: %s", raw_response)
+            
+            # Decode response
+            response = raw_response.decode(errors="replace").strip()
+            _LOGGER.debug("Decoded response: %s", response)
+            
+            if not response.startswith(">") or len(response) < 13:
+                _LOGGER.error("Invalid or incomplete response: %s", response)
+                return None
+                
+            # Extract data part (remove '>' prefix and LRC at the end)
+            data = response[1:-2]
+            
+            # Verify response format (should be like "01030401011237")
+            if not data.startswith(device_id + "0304"):
+                _LOGGER.error("Unexpected response format: %s", response)
+                return None
+                
+            # Extract the register values (bytes 5-8 and 9-12)
+            reg1 = int(data[6:10], 16)  # First register value
+            reg2 = int(data[10:14], 16) if len(data) >= 14 else 0  # Second register value
+            
+            # Extract firmware version (based on documentation)
+            firmware_major = (reg1 >> 8) & 0xFF  # Should be 1
+            firmware_minor = reg1 & 0xFF         # Should be 65 (ASCII 'A')
+
+            
+            # Extract hardware version from second register
+            hardware_code = (reg2 >> 6) & 0x3
+            
+            # Map hardware code to PCBA version
+            hardware_versions = {
+                0: "PCBA 141215",
+                1: "PCBA 160307",
+                2: "PCBA 170725",
+                3: "Not Used"
+            }
+            
+            hardware_version = hardware_versions.get(hardware_code, "Unknown")
+            firmware_version = f"V{firmware_major}.{firmware_minor//16}{firmware_minor%16}"
+            
+            _LOGGER.info(
+                "Firmware version: %s, Hardware version: %s (code: %d)",
+                firmware_version, hardware_version, hardware_code
+            )
+            
+            return {
+                "firmware_version": firmware_version,
+                "hardware_version": hardware_version,
+                "raw_registers": [reg1, reg2]
+            }
+        except Exception as e:
+            _LOGGER.exception("Error reading firmware info: %s", str(e))
+            return None
+    
+    def _calculate_lrc_ascii(self, message_hex):
+        """Calculate LRC for ASCII Modbus message."""
+        # Convert hex string to bytes
+        message_bytes = bytes.fromhex(message_hex)
+        
+        # Calculate LRC (sum all bytes and take two's complement)
+        lrc = (-sum(message_bytes)) & 0xFF
+        
+        # Return as hex string
+        return format(lrc, '02X')
+
+    def read_serial_number(self) -> Optional[str]:
+        """Read the device serial number."""
+        _LOGGER.debug("Starting read_serial_number()")
+        try:
+            if not self.serial or not self.serial.is_open:
+                _LOGGER.error("Serial port %s is not open", self.port)
+                return None
+                
+            # Format the Modbus ASCII message for reading 8 registers starting at 0x0050
+            device_id = format(self.slave_id, '02X')
+            function_code = "03"  # Read registers
+            register_address = "0050"  # Starting address
+            register_count = "0008"  # Number of registers to read
+            
+            # Build message without LRC
+            message_without_lrc = device_id + function_code + register_address + register_count
+            
+            # Calculate LRC
+            lrc = self._calculate_lrc_ascii(message_without_lrc)
+            
+            # Complete message
+            formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
+            
+            _LOGGER.debug("Sending message: %s", formatted_message)
+            self.serial.write(formatted_message)
+            
+            # Read response
+            raw_response = self.serial.readline()
+            _LOGGER.debug("Raw response: %s", raw_response)
+            
+            # Decode response
+            response = raw_response.decode(errors="replace").strip()
+            _LOGGER.debug("Decoded response: %s", response)
+            
+            if not response.startswith(">") or len(response) < 21:  # Minimum expected length for valid response
+                _LOGGER.error("Invalid or incomplete response: %s", response)
+                return None
+                
+            # Extract data part (remove '>' prefix and LRC at the end)
+            data = response[1:-2]
+            
+            # Verify response format (should be like "0103105000...")
+            if not data.startswith(device_id + "031050"):
+                _LOGGER.error("Unexpected response format: %s", response)
+                return None
+                
+            # Extract the 16 bytes of serial number data (8 registers = 16 hex characters)
+            serial_data = data[8:]  # Skip device_id + "031050"
+            
+            # Check if all registers are 0xFFFF (no serial number)
+            if all(serial_data[i:i+4] == "FFFF" for i in range(0, len(serial_data), 4)):
+                _LOGGER.debug("No serial number available (all registers are 0xFFFF)")
+                return None
+                
+            # Convert hex values to ASCII characters
+            try:
+                # Based on documentation example, format is like: "2W22xy01234567"
+                serial_bytes = bytes.fromhex(serial_data)
+                serial_number = serial_bytes.decode('ascii', errors='replace')
+                
+                # Remove any null bytes or non-printable characters
+                serial_number = ''.join(char for char in serial_number if char.isprintable())
+                
+                _LOGGER.debug("Decoded serial number: %s", serial_number)
+                return serial_number if serial_number else None
+            except Exception as e:
+                _LOGGER.error("Error decoding serial number data: %s", str(e))
+                return None
+        except Exception as e:
+            _LOGGER.exception("Error reading serial number: %s", str(e))
+            return None
             
             
     def __del__(self):
