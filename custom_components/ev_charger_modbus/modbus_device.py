@@ -72,7 +72,7 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.exception("Error updating state: %s", str(e))
             return False
-##### start of new ######
+
     def read_serial_number(self) -> Optional[str]:
         """Read the device serial number."""
         _LOGGER.debug("Starting read_serial_number()")
@@ -157,12 +157,11 @@ class ModbusASCIIDevice:
                 "available": False,
                 "error": str(e)
             }
-###### end of new ####
+
     def adjust_current_value(self, value):
         if value is None or value > 80:
             return 0
         return ceil(value)
-
 
     def read_current(self) -> Optional[dict]:
         """Read the EV state and current values."""
@@ -171,58 +170,75 @@ class ModbusASCIIDevice:
             if not self.serial or not self.serial.is_open:
                 _LOGGER.error("Serial port %s is not open", self.port)
                 return None
-
             message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
             _LOGGER.debug("Reading current with raw message: %s", message.hex().upper())
-
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             _LOGGER.debug("Sending message: %s", formatted_message)
-
             self.serial.write(formatted_message)
             raw_response = self.serial.readline()
             _LOGGER.debug("Raw response: %s", raw_response)
-
             response = raw_response.decode(errors="replace").strip()
             _LOGGER.debug("Decoded response: %s", response)
-
             if not response.startswith(">") or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
-
+            
+            # Remove the leading ">"
             stripped_response = response[1:]
-            byte_count = int(stripped_response[4:6], 16)
-            data = stripped_response[6:-2]
-            lrc = stripped_response[-2:]
-
+            
+            # Verify LRC
+            lrc_received = stripped_response[-2:]
             computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
-            if format(computed_lrc, '02X') != lrc:
-                _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc)
+            _LOGGER.debug("Calculated LRC: %s for message: %s", format(computed_lrc, '02X'), stripped_response[:-2])
+            if format(computed_lrc, '02X') != lrc_received:
+                _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
                 return None
-
-            registers = [int(data[i:i+4], 16) for i in range(0, len(data), 4)]
-            _LOGGER.debug("Decoded registers: %s", registers)
-
-            state_code_full = registers[1]
-            self.state_code = state_code_full >> 8
+            
+            # Parse the hex data
+            # Format: 0103063380C20E0E0E57
+            # 01 - Device ID
+            # 03 - Function code
+            # 06 - Byte count
+            # 3380 - First register (status/max current)
+            # C2 - State code
+            # 0E - ICT1 current (14A)
+            # 0E - ICT2 current (14A)
+            # 0E - ICT3 current (14A)
+            # 57 - LRC
+            
+            # Extract the data portion after byte count
+            data_part = stripped_response[6:-2]  # '3380C20E0E0E'
+            
+            # Extract status register (first 4 chars)
+            status_register = int(data_part[0:4], 16)  # '3380' -> 13184
+            
+            # Extract state code (next 2 chars)
+            self.state_code = int(data_part[4:6], 16)  # 'C2' -> 194 (0xC2)
             state_code_hex = f"0x{self.state_code:02X}"
             state_description = STATE_DESCRIPTIONS.get(self.state_code, "Unknown state")
-
+            
+            # Extract current values for each phase (next 6 chars, 2 chars each)
+            ict1 = int(data_part[6:8], 16) if len(data_part) >= 8 else None  # '0E' -> 14
+            ict2 = int(data_part[8:10], 16) if len(data_part) >= 10 else None  # '0E' -> 14
+            ict3 = int(data_part[10:12], 16) if len(data_part) >= 12 else None  # '0E' -> 14
+            
             values = {
                 "state_code": state_code_hex,
                 "state_description": state_description,
-                "max_current": registers[0] / 10.0,
-                "ict1": self.adjust_current_value(registers[2] / 266.0) if len(registers) > 2 else None,
-                "ict2": self.adjust_current_value(registers[3] / 266.0) if len(registers) > 3 else None,
-                "ict3": self.adjust_current_value(registers[4] / 266.0) if len(registers) > 4 else None,
-
+                "max_current": status_register / 10.0,  # Adjust if needed based on your protocol
+                "ict1": self.adjust_current_value(ict1) if ict1 is not None else None,
+                "ict2": self.adjust_current_value(ict2) if ict2 is not None else None,
+                "ict3": self.adjust_current_value(ict3) if ict3 is not None else None,
             }
-
             _LOGGER.info("Read current values: %s", values)
             return values
         except Exception as e:
             _LOGGER.exception("Error reading current: %s", str(e))
             return None
+
+###################
+
 
     def send_raw_command(self, command: str) -> bool:
         """Send a raw command to the device."""
