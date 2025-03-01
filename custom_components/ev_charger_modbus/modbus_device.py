@@ -1,4 +1,3 @@
-"""ModbusASCIIDevice class for EV Charger communication."""
 import logging
 from typing import Optional
 import serial
@@ -29,6 +28,33 @@ class ModbusASCIIDevice:
         except serial.SerialException as e:
             _LOGGER.error("Failed to open serial port %s: %s", port, str(e))
             raise
+
+    # Helper function to create properly formatted Modbus ASCII commands with dynamic slave_id
+    def _create_raw_command(self, command_hex: str) -> str:
+        """
+        Create a raw Modbus ASCII command with the proper slave_id.
+        
+        Args:
+            command_hex: The hex command string without slave_id and without ':' prefix and '\r\n' suffix
+            
+        Returns:
+            Properly formatted command string with slave_id, LRC, and framing
+        """
+        # Format slave_id as two hex digits
+        slave_id_hex = f"{self.slave_id:02X}"
+        
+        # Replace the first two characters (usually "01") with the proper slave_id
+        full_command = slave_id_hex + command_hex
+        
+        # Calculate LRC for the complete command
+        message_bytes = bytes.fromhex(full_command)
+        lrc = self._calculate_lrc(message_bytes)
+        
+        # Format the complete message with ':' prefix, command, LRC, and CRLF
+        formatted_message = f":{full_command}{format(lrc, '02X')}\r\n"
+        
+        _LOGGER.debug(f"Created raw command: {formatted_message}")
+        return formatted_message
 
     @property
     def state_code(self) -> Optional[int]:
@@ -81,7 +107,7 @@ class ModbusASCIIDevice:
                 _LOGGER.error("Serial port %s is not open", self.port)
                 return None
 
-        # Command to read serial number (0x0050)
+            # Command to read serial number (0x0050)
             message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
             _LOGGER.debug("Reading serial number with raw message: %s", message.hex().upper())
 
@@ -100,8 +126,8 @@ class ModbusASCIIDevice:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
-        # Extract the serial number from the response
-        # Remove the '>' prefix and the CRLF suffix
+            # Extract the serial number from the response
+            # Remove the '>' prefix and the CRLF suffix
             data = response[7:-2]  # Skip >0103xx header and LRC at end
             serial_number = bytes.fromhex(data).decode('ascii')
             _LOGGER.debug("Decoded serial number: %s", serial_number)
@@ -111,9 +137,6 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.exception("Error reading serial number: %s", str(e))
             return None
-
-
-
 
     def read_all_data(self) -> dict[str, any]:
         """Read all available data from the device."""
@@ -237,38 +260,38 @@ class ModbusASCIIDevice:
             _LOGGER.exception("Error reading current: %s", str(e))
             return None
 
-###################
-
-
     def send_raw_command(self, command: str) -> Optional[str]:
         """Send a raw command to the device."""
         try:
             _LOGGER.debug(f"Sending raw command: {command}")
             self.serial.write(command.encode())
             raw_response = self.serial.readline()  # Read the raw response
-            if raw_response: # Check if a response was received
-                response = raw_response.decode(errors="replace").strip() # Decode and strip
+            if raw_response:  # Check if a response was received
+                response = raw_response.decode(errors="replace").strip()  # Decode and strip
                 _LOGGER.debug(f"Received decoded response: {response}")
-                if response.startswith(">01"):
+                # Updated to check for dynamic slave_id instead of hardcoded "01"
+                expected_prefix = f">{self.slave_id:02X}"
+                if response.startswith(expected_prefix):
                     return response  # Return the response
                 else:
-                    _LOGGER.warning(f"Unexpected response: {response}")
-                    return None # Unexpected response
+                    _LOGGER.warning(f"Unexpected response: {response}, expected prefix: {expected_prefix}")
+                    return None  # Unexpected response
             else:
                 _LOGGER.warning("No response received from serial port.")
-                return None # No response
+                return None  # No response
         except Exception as e:
             _LOGGER.error(f"Error sending raw command: {str(e)}")
-            return None # Error
-        
+            return None  # Error
         
     def enable_charging(self) -> bool:
         """Enable charging."""
-        return self.send_raw_command(":01100005000102A1A1A5\r\n")
+        # Original: ":01100005000102A1A1A5\r\n"
+        return self.send_raw_command(self._create_raw_command("100005000102A1A1"))
 
     def disable_charging(self) -> bool:
         """Disable charging."""
-        return self.send_raw_command(":01100005000102E0E027\r\n")
+        # Original: ":01100005000102E0E027\r\n"
+        return self.send_raw_command(self._create_raw_command("100005000102E0E0"))
 
     def _calculate_lrc(self, message: bytes) -> int:
         """Calculate LRC for Modbus ASCII message."""
@@ -283,7 +306,8 @@ class ModbusASCIIDevice:
         """Write the maximum current setting."""
         try:
             if current == 0:
-                return self.send_raw_command(":0110001400010203E8ED\r\n")
+                # Original: ":0110001400010203E8ED\r\n"
+                return self.send_raw_command(self._create_raw_command("10001400010203E8"))
 
             if not 5 <= current <= 16:
                 _LOGGER.error(f"Current value {current}A is outside valid range (0 or 5-16A)")
@@ -304,7 +328,9 @@ class ModbusASCIIDevice:
             response = self.serial.readline()
             _LOGGER.debug(f"Received raw response: {response}")
 
-            if b'>01100014' in response:
+            # Updated to check for dynamic slave_id instead of hardcoded "01"
+            expected_prefix = f">{self.slave_id:02X}100014".encode()
+            if expected_prefix in response:
                 _LOGGER.info(f"Successfully set current to {current}A")
                 return True
             else:
@@ -313,8 +339,6 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
             return False
-
-
 
     def is_charging_enabled(self) -> bool:
         """Check if charging is enabled."""
@@ -336,25 +360,28 @@ class ModbusASCIIDevice:
         """Request and parse the duty cycle from the device."""
         _LOGGER.debug("Starting read_duty_cycle()")
         try:
-            # Send command to read duty cycle
-            response = self.send_raw_command(":0103002E0005C9\r\n")
+            # Original: ":0103002E0005C9\r\n"
+            response = self.send_raw_command(self._create_raw_command("03002E0005"))
             if not response:
                 _LOGGER.error("No response received for duty cycle request")
                 return None
     
             # Extract the data part after the header
-            data_start = response.find(">01030A2E") + len(">01030A2E")
-            if data_start == -1:
-                _LOGGER.error("Invalid response format: header not found")
+            # Updated to use dynamic slave_id instead of hardcoded "01"
+            expected_header = f">{self.slave_id:02X}030A2E"
+            header_pos = response.find(expected_header)
+            if header_pos == -1:
+                _LOGGER.error(f"Invalid response format: header '{expected_header}' not found")
                 return None
     
+            data_start = header_pos + len(expected_header)
             data_part = response[data_start:]
             if len(data_part) < 4:
                 _LOGGER.error("Invalid response format: data too short")
                 return None
     
             # Extract the duty cycle value
-            duty_cycle_hex = data_part[4:8] # Corrected byte extraction
+            duty_cycle_hex = data_part[4:8]  # Corrected byte extraction
             duty_cycle = int(duty_cycle_hex, 16) / 100.0
     
             _LOGGER.info(f"Duty cycle retrieved: {duty_cycle}%")
@@ -392,7 +419,7 @@ class ModbusASCIIDevice:
             power = total_current * voltage
 
             # Apply duty cycle adjustment - ignoring this for now.
-            adjusted_power = power #* (duty_cycle / 100.0)
+            adjusted_power = power  # * (duty_cycle / 100.0)
 
             _LOGGER.info(f"Calculated simplified power consumption (adjusted for duty cycle): {adjusted_power:.2f} Watts")
             _LOGGER.debug(f"Power: {power:.2f} Watts, Duty Cycle: {duty_cycle:.2f}%")
@@ -401,7 +428,6 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.error(f"Error calculating power consumption: {str(e)}")
             return None
-            
             
     def __del__(self):
         """Clean up serial connection."""
