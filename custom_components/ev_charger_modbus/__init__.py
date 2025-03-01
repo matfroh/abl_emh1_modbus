@@ -54,7 +54,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    
+
     # Create ModbusASCIIDevice instance
     device = ModbusASCIIDevice(
         port=entry.data[CONF_PORT],
@@ -75,11 +75,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         update_interval=timedelta(seconds=30)
     )
 
+    # Make the device available to the coordinator.
+    coordinator.device = device # <--- This is the added line
+
     # Initial data fetch
     await coordinator.async_config_entry_first_refresh()
-    
+
     device_name = entry.data.get(CONF_NAME, DEFAULT_NAME)
-    
+
     # Store the device instance and coordinator
     hass.data[DOMAIN][entry.entry_id] = {
         "device": device,
@@ -92,11 +95,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current = call.data["current"]
         device = hass.data[DOMAIN][entry.entry_id]["device"]
         success = await hass.async_add_executor_job(device.write_current, current)
-        
+
         if not success:
             _LOGGER.error(f"Failed to set charging current to {current}A")
             return
-        
+
         _LOGGER.info(f"Successfully set charging current to {current}A")
         await coordinator.async_request_refresh()
 

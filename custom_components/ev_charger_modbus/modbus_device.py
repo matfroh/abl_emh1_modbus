@@ -240,18 +240,28 @@ class ModbusASCIIDevice:
 ###################
 
 
-    def send_raw_command(self, command: str) -> bool:
+    def send_raw_command(self, command: str) -> Optional[str]:
         """Send a raw command to the device."""
         try:
             _LOGGER.debug(f"Sending raw command: {command}")
             self.serial.write(command.encode())
-            response = self.serial.readline()
-            _LOGGER.debug(f"Received raw response: {response}")
-            return b'>01' in response
+            raw_response = self.serial.readline()  # Read the raw response
+            if raw_response: # Check if a response was received
+                response = raw_response.decode(errors="replace").strip() # Decode and strip
+                _LOGGER.debug(f"Received decoded response: {response}")
+                if response.startswith(">01"):
+                    return response  # Return the response
+                else:
+                    _LOGGER.warning(f"Unexpected response: {response}")
+                    return None # Unexpected response
+            else:
+                _LOGGER.warning("No response received from serial port.")
+                return None # No response
         except Exception as e:
             _LOGGER.error(f"Error sending raw command: {str(e)}")
-            return False
-
+            return None # Error
+        
+        
     def enable_charging(self) -> bool:
         """Enable charging."""
         return self.send_raw_command(":01100005000102A1A1A5\r\n")
@@ -321,7 +331,78 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.error(f"Error checking charging state: {e}")
             return False
+ 
+    def read_duty_cycle(self) -> Optional[float]:
+        """Request and parse the duty cycle from the device."""
+        _LOGGER.debug("Starting read_duty_cycle()")
+        try:
+            # Send command to read duty cycle
+            response = self.send_raw_command(":0103002E0005C9\r\n")
+            if not response:
+                _LOGGER.error("No response received for duty cycle request")
+                return None
+    
+            # Extract the data part after the header
+            data_start = response.find(">01030A2E") + len(">01030A2E")
+            if data_start == -1:
+                _LOGGER.error("Invalid response format: header not found")
+                return None
+    
+            data_part = response[data_start:]
+            if len(data_part) < 4:
+                _LOGGER.error("Invalid response format: data too short")
+                return None
+    
+            # Extract the duty cycle value
+            duty_cycle_hex = data_part[4:8] # Corrected byte extraction
+            duty_cycle = int(duty_cycle_hex, 16) / 100.0
+    
+            _LOGGER.info(f"Duty cycle retrieved: {duty_cycle}%")
+            _LOGGER.debug(f"Duty cycle hex: {duty_cycle_hex}")
+            return duty_cycle
+    
+        except Exception as e:
+            _LOGGER.error(f"Error reading duty cycle: {str(e)}")
+            return None
+            
+    def calculate_consumption_with_duty_cycle(self) -> Optional[float]:
+        """Calculate simplified power consumption including duty cycle adjustment."""
+        _LOGGER.debug("Starting calculate_consumption_with_duty_cycle()")
+        try:
+            # Read current values
+            data = self.read_current()
+            if not data:
+                _LOGGER.error("Failed to read current values for power calculation")
+                return None
 
+            # Replace None with 0 and sum ICT values
+            ict1 = data.get('ict1', 0)
+            ict2 = data.get('ict2', 0)
+            ict3 = data.get('ict3', 0)
+            total_current = ict1 + ict2 + ict3
+
+            # Retrieve duty cycle
+            duty_cycle = self.read_duty_cycle()
+            if duty_cycle is None:
+                _LOGGER.error("Failed to retrieve duty cycle")
+                return None
+
+            # Calculate simplified power
+            voltage = 230  # Volts
+            power = total_current * voltage
+
+            # Apply duty cycle adjustment - ignoring this for now.
+            adjusted_power = power #* (duty_cycle / 100.0)
+
+            _LOGGER.info(f"Calculated simplified power consumption (adjusted for duty cycle): {adjusted_power:.2f} Watts")
+            _LOGGER.debug(f"Power: {power:.2f} Watts, Duty Cycle: {duty_cycle:.2f}%")
+            return adjusted_power
+
+        except Exception as e:
+            _LOGGER.error(f"Error calculating power consumption: {str(e)}")
+            return None
+            
+            
     def __del__(self):
         """Clean up serial connection."""
         try:
