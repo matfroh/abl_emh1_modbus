@@ -14,7 +14,11 @@
                     "name": "Name",
                     "port": "Serial Port (usually /dev/ttyUSB0)",
                     "slave": "Slave ID (usually 1)",
-                    "baudrate": "Baud Rate (usually 38400)"
+                    "baudrate": "Baud Rate (usually 38400)",
+                    "max_current": "Installation Maximum Current (A)"
+                },
+                "data_description": {
+                    "max_current": "Select the maximum current your charging station supports. This depends on your electrical installation (16A or 32A)"
                 },
                 "description": "Set up your EV Charger Modbus connection.",
                 "title": "EV Charger Modbus"

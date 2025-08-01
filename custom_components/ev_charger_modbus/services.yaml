@@ -1,15 +1,19 @@
 # custom_components/ev_charger_modbus/services.yaml
 set_charging_current:
-  name: Set Charging Current
-  description: Set the maximum charging current for the EV charger
+  name: Set charging current
+  description: Set the charging current of the EV charger.
+  target:
+    entity:
+      integration: ev_charger_modbus
+      domain: number
   fields:
     current:
       name: Current
-      description: The charging current in amperes (0, or between 5 and 16)
+      description: The charging current in amperes (between 5 and max configured amperes)
       required: true
       selector:
         number:
-          min: 0
-          max: 16
+          min: 5
+          max: 32  # Set to highest possible value, will be limited by configuration
           step: 1
-          unit_of_measurement: A
+          mode: slider

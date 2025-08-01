@@ -11,9 +11,11 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     DOMAIN,
     CONF_BAUDRATE,
+    CONF_MAX_CURRENT,
     DEFAULT_NAME,
     DEFAULT_SLAVE,
     DEFAULT_BAUDRATE,
+    DEFAULT_MAX_CURRENT,
 )
 from .modbus_device import ModbusASCIIDevice
 
@@ -94,6 +96,9 @@ class EVChargerModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): vol.All(
                         vol.Coerce(int), vol.In([9600, 19200, 38400, 57600, 115200])
+                    ),
+                    vol.Required(CONF_MAX_CURRENT, default=DEFAULT_MAX_CURRENT): vol.All(
+                        vol.Coerce(int), vol.In([16, 32])
                     ),
                 }
             ),

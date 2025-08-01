@@ -9,12 +9,13 @@ _LOGGER = logging.getLogger(__name__)
 class ModbusASCIIDevice:
     """Handles communication with the Modbus ASCII device."""
 
-    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 38400):
+    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200):
         """Initialize the Modbus ASCII device."""
         _LOGGER.info("Initializing ModbusASCIIDevice with port %s", port)
         self.port = port
         self._state_code = None
         self.slave_id = slave_id
+        self.max_current = 16  # Add this line
         try:
             self.serial = serial.Serial(
                 port=port,
@@ -303,15 +304,15 @@ class ModbusASCIIDevice:
         return lrc
 
     def write_current(self, current: int) -> bool:
-        """Write the maximum current setting."""
+        """Write charging current."""
+        if not 5 <= current <= self.max_current:  # Use instance variable instead of hardcoded value
+            _LOGGER.error(f"Current must be between 5 and {self.max_current}")
+            return False
+
         try:
             if current == 0:
                 # Original: ":0110001400010203E8ED\r\n"
                 return self.send_raw_command(self._create_raw_command("10001400010203E8"))
-
-            if not 5 <= current <= 16:
-                _LOGGER.error(f"Current value {current}A is outside valid range (0 or 5-16A)")
-                return False
 
             duty_cycle = int(current * 16.6)
             _LOGGER.debug(f"Converting {current}A to duty cycle: {duty_cycle} (0x{duty_cycle:04X})")

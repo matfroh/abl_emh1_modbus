@@ -5,24 +5,25 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import EVChargerEntity
-from .const import DOMAIN
+from .const import (
+    DOMAIN,
+    CONF_MAX_CURRENT,
+    DEFAULT_MAX_CURRENT,
+)
 
 import logging
 _LOGGER = logging.getLogger(__name__)
 
-class EVChargerSlider(EVChargerEntity, NumberEntity):
+class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
     """Slider for setting maximum charging current."""
 
-    def __init__(self, coordinator, device_name: str, device) -> None:
+    def __init__(self, coordinator, device_name: str) -> None:
         """Initialize the slider."""
         super().__init__(coordinator, device_name)
-        self._device = device
-        self._attr_name = f"{device_name} Charging Current"
-        self._attr_unique_id = f"{device_name}_charging_current"
-        self._attr_native_min_value = 0
-        self._attr_native_max_value = 16
+        self._attr_native_min_value = 5
+        self._attr_native_max_value = coordinator.max_current
         self._attr_native_step = 1
-        self._attr_native_value = 16  # Default value
+        self._attr_native_value = coordinator.max_current  # Default value
         _LOGGER.debug("Initialized slider with name: %s", self._attr_name)
 
     @property
@@ -60,5 +61,5 @@ async def async_setup_entry(
 
     _LOGGER.debug("Setting up number platform with device_name: %s", device_name)
     
-    entity = EVChargerSlider(coordinator, device_name, device)
+    entity = ChargingCurrentNumber(coordinator, device_name)
     async_add_entities([entity])

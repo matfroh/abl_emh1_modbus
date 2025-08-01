@@ -12,9 +12,11 @@ from homeassistant.helpers.entity import DeviceInfo
 from .const import (
     DOMAIN,
     CONF_BAUDRATE,
+    CONF_MAX_CURRENT,
     DEFAULT_NAME,
     DEFAULT_SLAVE,
     DEFAULT_BAUDRATE,
+    DEFAULT_MAX_CURRENT,
 )
 from .modbus_device import ModbusASCIIDevice
 from datetime import datetime
@@ -59,7 +61,8 @@ class EVChargerEntity(CoordinatorEntity):
 SET_CURRENT_SCHEMA = vol.Schema({
     vol.Required("current"): vol.All(
         vol.Coerce(int),
-        vol.Range(min=0, max=16)
+        # Now using the configured max current instead of hardcoded 16
+        vol.Range(min=0, max=lambda value: hass.data[DOMAIN][entry.entry_id].get("max_current", 16))
     )
 })
 
@@ -125,6 +128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.firmware_info = firmware_info  # Store the whole dictionary
     coordinator.firmware_version = firmware_info.get("firmware_version") if firmware_info else None
     coordinator.hardware_version = firmware_info.get("hardware_version") if firmware_info else None
+    coordinator.max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
 
     await coordinator.async_config_entry_first_refresh()
 
@@ -133,6 +137,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "device": device,
         "coordinator": coordinator,
         CONF_NAME: device_name,
+        "max_current": entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
