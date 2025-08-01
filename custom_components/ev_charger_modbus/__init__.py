@@ -22,6 +22,7 @@ from .modbus_device import ModbusASCIIDevice
 from datetime import datetime
 import asyncio
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
@@ -29,6 +30,15 @@ PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 # Add device specific constants
 MANUFACTURER = "ABL"
 MODEL = "eMH1"
+
+SET_CHARGING_CURRENT_SERVICE = "set_charging_current"
+SET_CHARGING_CURRENT_SCHEMA = vol.Schema({
+    vol.Required("entity_id"): cv.entity_id,
+    vol.Required("current"): vol.All(
+        vol.Coerce(int),
+        vol.Range(min=5, max=32)  # We'll validate the actual max in the handler
+    )
+})
 
 class EVChargerEntity(CoordinatorEntity):
     """Base class for EV Charger entities."""
@@ -92,18 +102,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    # Create schema here where we have access to hass and entry
-    set_current_schema = vol.Schema({
-        vol.Required("entity_id"): cv.entity_id,
-        vol.Required("current"): vol.All(
-            vol.Coerce(int),
-            vol.Range(
-                min=5, 
-                max=entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
-            )
-        )
-    })
-
     device = ModbusASCIIDevice(
         port=entry.data[CONF_PORT],
         slave_id=entry.data.get(CONF_SLAVE, DEFAULT_SLAVE),
@@ -147,27 +145,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
-        """Handle the service call."""
+        """Handle setting the charging current."""
         entity_id = call.data["entity_id"]
-        current = call.data["current"]
-
-        # Find the entity
-        entity = None
-        for entry_data in hass.data[DOMAIN].values():
-            if "entities" in entry_data and entity_id in entry_data["entities"]:
-                entity = entry_data["entities"][entity_id]
-                break
-
-        if entity:
+        current = int(call.data["current"])
+        
+        # Get the entity from the entity registry
+        entity_registry = er.async_get(hass)
+        entity_entry = entity_registry.async_get(entity_id)
+        
+        if not entity_entry or entity_entry.domain != "number":
+            _LOGGER.error(
+                "Entity %s not found or not a number entity", 
+                entity_id
+            )
+            return
+        
+        # Get the actual entity
+        entity = hass.data[DOMAIN][entry.entry_id]["entities"].get(entity_id)
+        if not entity:
+            _LOGGER.error("Entity %s not configured", entity_id)
+            return
+            
+        # Validate against the configured maximum
+        max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+        if current > max_current:
+            _LOGGER.error(
+                "Requested current %d exceeds maximum allowed current %d", 
+                current, 
+                max_current
+            )
+            return
+            
+        try:
             await entity.async_set_native_value(current)
-        else:
-            _LOGGER.error("Entity %s not found", entity_id)
+        except Exception as ex:
+            _LOGGER.error("Failed to set current: %s", str(ex))
 
+    # Register the service
     hass.services.async_register(
         DOMAIN,
-        "set_charging_current",
+        SET_CHARGING_CURRENT_SERVICE,
         handle_set_charging_current,
-        schema=set_current_schema
+        schema=SET_CHARGING_CURRENT_SCHEMA
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
