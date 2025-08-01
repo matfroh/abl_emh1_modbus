@@ -59,14 +59,6 @@ class EVChargerEntity(CoordinatorEntity):
         self._attr_device_info = DeviceInfo(**device_info)
         self._attr_has_entity_name = True
 
-SET_CURRENT_SCHEMA = vol.Schema({
-    vol.Required("entity_id"): cv.entity_id,  # Add this line
-    vol.Required("current"): vol.All(
-        vol.Coerce(int),
-        vol.Range(min=5, max=lambda v: hass.data[DOMAIN][entry.entry_id].get("max_current", 16))
-    )
-})
-
 async def async_update_data(coordinator, device, device_info, hass):
     """Fetch data from the device."""
     now = datetime.now()
@@ -99,6 +91,18 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EV Charger from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+
+    # Create schema here where we have access to hass and entry
+    set_current_schema = vol.Schema({
+        vol.Required("entity_id"): cv.entity_id,
+        vol.Required("current"): vol.All(
+            vol.Coerce(int),
+            vol.Range(
+                min=5, 
+                max=entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+            )
+        )
+    })
 
     device = ModbusASCIIDevice(
         port=entry.data[CONF_PORT],
@@ -139,6 +143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         CONF_NAME: device_name,
         "max_current": entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
+        "entities": {},  # Add this to store entities
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
@@ -146,16 +151,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current = call.data["current"]
         entity_id = call.data["entity_id"]
         
-        # Get the entity
-        entity = hass.data[DOMAIN][entry.entry_id]["entities"].get(entity_id)
+        # Find the entity in any entry's entities
+        entity = None
+        for entry_data in hass.data[DOMAIN].values():
+            if entity_id in entry_data["entities"]:
+                entity = entry_data["entities"][entity_id]
+                break
+
         if entity:
             await entity.async_set_native_value(current)
+        else:
+            _LOGGER.error("Entity %s not found", entity_id)
 
     hass.services.async_register(
         DOMAIN,
         "set_charging_current",
         handle_set_charging_current,
-        schema=SET_CURRENT_SCHEMA,
+        schema=set_current_schema,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

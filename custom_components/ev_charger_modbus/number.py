@@ -5,7 +5,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from . import EVChargerEntity  # Add this import
-from .const import DOMAIN, CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT
+from .const import DOMAIN, CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT, CONF_NAME
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,8 +16,15 @@ async def async_setup_entry(
 ) -> None:
     """Set up the EV Charger number platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    device_name = hass.data[DOMAIN][entry.entry_id]["name"]
-    async_add_entities([ChargingCurrentNumber(coordinator, device_name)])
+    device_name = hass.data[DOMAIN][entry.entry_id][CONF_NAME]
+    
+    # Create the entity
+    entity = ChargingCurrentNumber(coordinator, device_name)
+    
+    # Store the entity reference
+    hass.data[DOMAIN][entry.entry_id]["entities"][entity.entity_id] = entity
+    
+    async_add_entities([entity])
 
 class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
     """Representation of the charging current setting."""
@@ -26,15 +33,12 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
         """Initialize the number entity."""
         super().__init__(coordinator, device_name)
         
-        # Get the configured max current from the entry data
-        self._max_current = coordinator.config_entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
-        
         self._attr_name = "Charging Current"
         self._attr_unique_id = f"{device_name}_charging_current"
         self._attr_native_min_value = 5
-        self._attr_native_max_value = self._max_current  # Use configured value
+        self._attr_native_max_value = coordinator.max_current
         self._attr_native_step = 1
-        self._attr_native_value = self._max_current  # Default value
+        self._attr_native_value = coordinator.data.get("charging_current") if coordinator.data else coordinator.max_current
         self._attr_mode = "slider"
         
         _LOGGER.debug(
