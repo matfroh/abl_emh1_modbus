@@ -26,12 +26,15 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
         """Initialize the number entity."""
         super().__init__(coordinator, device_name)
         
+        # Get the configured max current from the entry data
+        self._max_current = coordinator.config_entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+        
         self._attr_name = "Charging Current"
         self._attr_unique_id = f"{device_name}_charging_current"
         self._attr_native_min_value = 5
-        self._attr_native_max_value = coordinator.max_current
+        self._attr_native_max_value = self._max_current  # Use configured value
         self._attr_native_step = 1
-        self._attr_native_value = coordinator.max_current  # Default value
+        self._attr_native_value = self._max_current  # Default value
         self._attr_mode = "slider"
         
         _LOGGER.debug(
@@ -42,6 +45,10 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Update the current value."""
+        if not 5 <= value <= self._max_current:
+            _LOGGER.error(f"Current must be between 5 and {self._max_current}")
+            return
+            
         await self.coordinator.hass.async_add_executor_job(
             self.coordinator.device.write_current, int(value)
         )

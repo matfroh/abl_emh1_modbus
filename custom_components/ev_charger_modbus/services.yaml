@@ -9,11 +9,11 @@ set_charging_current:
   fields:
     current:
       name: Current
-      description: The charging current in amperes (between 5 and max configured amperes)
+      description: The charging current in amperes (between 5 and configured maximum)
       required: true
       selector:
         number:
           min: 5
-          max: 32  # Set to highest possible value, will be limited by configuration
+          max: 32  # This will be limited by the entity's configuration
           step: 1
           mode: slider

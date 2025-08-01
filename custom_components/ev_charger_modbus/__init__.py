@@ -21,6 +21,7 @@ from .const import (
 from .modbus_device import ModbusASCIIDevice
 from datetime import datetime
 import asyncio
+import homeassistant.helpers.config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
@@ -59,10 +60,10 @@ class EVChargerEntity(CoordinatorEntity):
         self._attr_has_entity_name = True
 
 SET_CURRENT_SCHEMA = vol.Schema({
+    vol.Required("entity_id"): cv.entity_id,  # Add this line
     vol.Required("current"): vol.All(
         vol.Coerce(int),
-        # Now using the configured max current instead of hardcoded 16
-        vol.Range(min=0, max=lambda value: hass.data[DOMAIN][entry.entry_id].get("max_current", 16))
+        vol.Range(min=5, max=lambda v: hass.data[DOMAIN][entry.entry_id].get("max_current", 16))
     )
 })
 
@@ -143,13 +144,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_set_charging_current(call: ServiceCall) -> None:
         """Handle service call to set charging current."""
         current = call.data["current"]
-        await hass.async_add_executor_job(device.wake_up_device)
-        success = await hass.async_add_executor_job(device.write_current, current)
-        if not success:
-            _LOGGER.error(f"Failed to set charging current to {current}A")
-        else:
-            _LOGGER.info(f"Charging current set to {current}A")
-            await coordinator.async_request_refresh()
+        entity_id = call.data["entity_id"]
+        
+        # Get the entity
+        entity = hass.data[DOMAIN][entry.entry_id]["entities"].get(entity_id)
+        if entity:
+            await entity.async_set_native_value(current)
 
     hass.services.async_register(
         DOMAIN,
