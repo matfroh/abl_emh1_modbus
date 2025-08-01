@@ -21,7 +21,7 @@ from .const import (
 from .modbus_device import ModbusASCIIDevice
 from datetime import datetime
 import asyncio
-import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import config_validation as cv
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
@@ -147,14 +147,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     }
 
     async def handle_set_charging_current(call: ServiceCall) -> None:
-        """Handle service call to set charging current."""
-        current = call.data["current"]
+        """Handle the service call."""
         entity_id = call.data["entity_id"]
-        
-        # Find the entity in any entry's entities
+        current = call.data["current"]
+
+        # Find the entity
         entity = None
         for entry_data in hass.data[DOMAIN].values():
-            if entity_id in entry_data["entities"]:
+            if "entities" in entry_data and entity_id in entry_data["entities"]:
                 entity = entry_data["entities"][entity_id]
                 break
 
@@ -167,7 +167,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DOMAIN,
         "set_charging_current",
         handle_set_charging_current,
-        schema=set_current_schema,
+        schema=set_current_schema
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
