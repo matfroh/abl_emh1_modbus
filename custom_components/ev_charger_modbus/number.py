@@ -3,9 +3,10 @@ import logging
 from homeassistant.components.number import NumberEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_NAME  # Import from here instead
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from . import EVChargerEntity  # Add this import
-from .const import DOMAIN, CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT, CONF_NAME
+from . import EVChargerEntity
+from .const import DOMAIN, CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT  # Remove CONF_NAME from here
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def async_setup_entry(
     entity = ChargingCurrentNumber(coordinator, device_name)
     
     # Store the entity reference
+    hass.data[DOMAIN][entry.entry_id].setdefault("entities", {})
     hass.data[DOMAIN][entry.entry_id]["entities"][entity.entity_id] = entity
     
     async_add_entities([entity])
