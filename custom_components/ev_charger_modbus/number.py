@@ -4,6 +4,7 @@ from homeassistant.components.number import NumberEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from . import EVChargerEntity  # Add this import
 from .const import DOMAIN, CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT
 
 _LOGGER = logging.getLogger(__name__)
