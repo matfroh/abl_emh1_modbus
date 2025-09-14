@@ -30,6 +30,50 @@ class ModbusASCIIDevice:
             _LOGGER.error("Failed to open serial port %s: %s", port, str(e))
             raise
 
+    def _read_response(self) -> Optional[str]:
+        """Read and clean response from serial port, handling garbage characters."""
+        try:
+            # Read with a reasonable timeout
+            raw_response = self.serial.readline()
+            if not raw_response:
+                return None
+                
+            _LOGGER.debug("Raw response bytes: %s", raw_response)
+            
+            # Decode with error handling
+            response = raw_response.decode(errors="replace").strip()
+            _LOGGER.debug("Initial decoded response: %s", response)
+            
+            # Find the actual start of the Modbus ASCII response (starts with '>')
+            start_pos = response.find('>')
+            if start_pos == -1:
+                _LOGGER.error("No valid Modbus ASCII start marker found in: %s", response)
+                # Clear buffer on error to prevent corruption
+                self._clear_serial_buffer()
+                return None
+                
+            # Extract the clean response from the start marker
+            clean_response = response[start_pos:]
+            _LOGGER.debug("Cleaned response: %s", clean_response)
+            
+            return clean_response
+            
+        except Exception as e:
+            _LOGGER.exception("Error reading response: %s", e)
+            # Clear buffer on error
+            self._clear_serial_buffer()
+            return None
+
+    def _clear_serial_buffer(self):
+        """Clear any remaining data in the serial buffer."""
+        try:
+            if self.serial and self.serial.is_open:
+                # Clear input buffer to remove any stale data
+                self.serial.reset_input_buffer()
+                _LOGGER.debug("Cleared serial input buffer")
+        except Exception as e:
+            _LOGGER.warning("Failed to clear serial buffer: %s", e)
+
     # Helper function to create properly formatted Modbus ASCII commands with dynamic slave_id
     def _create_raw_command(self, command_hex: str) -> str:
         """
@@ -117,13 +161,10 @@ class ModbusASCIIDevice:
             _LOGGER.debug("Sending message: %s", formatted_message)
 
             self.serial.write(formatted_message)
-            raw_response = self.serial.readline()
-            _LOGGER.debug("Raw response: %s", raw_response)
-
-            response = raw_response.decode(errors="replace").strip()
-            _LOGGER.debug("Decoded response: %s", response)
-
-            if not response.startswith(">") or len(response) < 13:
+            
+            # Use the new helper method to read and clean the response
+            response = self._read_response()
+            if not response or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
@@ -183,9 +224,10 @@ class ModbusASCIIDevice:
             }
 
     def adjust_current_value(self, value):
+        """Return the raw current value without artificial rounding."""
         if value is None or value > 80:
             return 0
-        return ceil(value)
+        return value  # Return the actual value, don't round it up
 
     def read_current(self) -> Optional[dict]:
         """Read the EV state and current values."""
@@ -200,11 +242,10 @@ class ModbusASCIIDevice:
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             _LOGGER.debug("Sending message: %s", formatted_message)
             self.serial.write(formatted_message)
-            raw_response = self.serial.readline()
-            _LOGGER.debug("Raw response: %s", raw_response)
-            response = raw_response.decode(errors="replace").strip()
-            _LOGGER.debug("Decoded response: %s", response)
-            if not response.startswith(">") or len(response) < 13:
+            
+            # Use the new helper method to read and clean the response
+            response = self._read_response()
+            if not response or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
             
@@ -266,9 +307,10 @@ class ModbusASCIIDevice:
         try:
             _LOGGER.debug(f"Sending raw command: {command}")
             self.serial.write(command.encode())
-            raw_response = self.serial.readline()  # Read the raw response
-            if raw_response:  # Check if a response was received
-                response = raw_response.decode(errors="replace").strip()  # Decode and strip
+            
+            # Use the new helper method to read and clean the response
+            response = self._read_response()
+            if response:
                 _LOGGER.debug(f"Received decoded response: {response}")
                 # Updated to check for dynamic slave_id instead of hardcoded "01"
                 expected_prefix = f">{self.slave_id:02X}"
@@ -487,15 +529,9 @@ class ModbusASCIIDevice:
             _LOGGER.debug("Sending message: %s", formatted_message)
             self.serial.write(formatted_message)
             
-            # Read response
-            raw_response = self.serial.readline()
-            _LOGGER.debug("Raw response: %s", raw_response)
-            
-            # Decode response
-            response = raw_response.decode(errors="replace").strip()
-            _LOGGER.debug("Decoded response: %s", response)
-            
-            if not response.startswith(">") or len(response) < 13:
+            # Read response using the new helper method
+            response = self._read_response()
+            if not response or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
                 
@@ -581,15 +617,9 @@ class ModbusASCIIDevice:
             _LOGGER.debug("Sending message: %s", formatted_message)
             self.serial.write(formatted_message)
             
-            # Read response
-            raw_response = self.serial.readline()
-            _LOGGER.debug("Raw response: %s", raw_response)
-            
-            # Decode response
-            response = raw_response.decode(errors="replace").strip()
-            _LOGGER.debug("Decoded response: %s", response)
-            
-            if not response.startswith(">") or len(response) < 21:  # Minimum expected length for valid response
+            # Read response using the new helper method
+            response = self._read_response()
+            if not response or len(response) < 21:  # Minimum expected length for valid response
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
                 
