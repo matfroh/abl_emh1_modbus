@@ -67,6 +67,17 @@ class EVChargerModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "cannot_connect"
                 else:
                     _LOGGER.debug("Successfully read current value: %s", result)
+                    
+                    # Try to detect max current from device
+                    detected_max_current = await self.hass.async_add_executor_job(device.read_max_current_setting)
+                    if detected_max_current:
+                        _LOGGER.info("Detected max current from device: %dA", detected_max_current)
+                        # Store the detected value in user_input for the entry
+                        user_input[CONF_MAX_CURRENT] = detected_max_current
+                    else:
+                        _LOGGER.warning("Could not detect max current, using default: %dA", DEFAULT_MAX_CURRENT)
+                        user_input[CONF_MAX_CURRENT] = DEFAULT_MAX_CURRENT
+                    
                     # Close the connection after testing
                     try:
                         device.serial.close()
@@ -96,9 +107,6 @@ class EVChargerModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     vol.Optional(CONF_BAUDRATE, default=DEFAULT_BAUDRATE): vol.All(
                         vol.Coerce(int), vol.In([9600, 19200, 38400, 57600, 115200])
-                    ),
-                    vol.Required(CONF_MAX_CURRENT, default=DEFAULT_MAX_CURRENT): vol.All(
-                        vol.Coerce(int), vol.In([16, 32])
                     ),
                 }
             ),
