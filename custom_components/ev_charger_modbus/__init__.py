@@ -106,6 +106,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         port=entry.data[CONF_PORT],
         slave_id=entry.data.get(CONF_SLAVE, DEFAULT_SLAVE),
         baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
+        max_current=entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
     )
 
     await hass.async_add_executor_job(device.wake_up_device)

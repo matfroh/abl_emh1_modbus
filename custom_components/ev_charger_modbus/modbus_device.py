@@ -9,13 +9,13 @@ _LOGGER = logging.getLogger(__name__)
 class ModbusASCIIDevice:
     """Handles communication with the Modbus ASCII device."""
 
-    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200):
+    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200, max_current: int = 16):
         """Initialize the Modbus ASCII device."""
         _LOGGER.info("Initializing ModbusASCIIDevice with port %s", port)
         self.port = port
         self._state_code = None
         self.slave_id = slave_id
-        self.max_current = 16  # Add this line
+        self.max_current = max_current
         try:
             self.serial = serial.Serial(
                 port=port,

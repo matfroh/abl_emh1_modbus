@@ -48,19 +48,28 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
         )
 
     async def async_set_native_value(self, value: float) -> None:
-        """Update the current value."""
+        """Set new value."""
+        _LOGGER.debug("Setting charging current to: %s", value)
         if not 5 <= value <= self._attr_native_max_value:
             _LOGGER.error(f"Current must be between 5 and {self._attr_native_max_value}")
             return
             
-        await self.coordinator.hass.async_add_executor_job(
-            self.coordinator.device.write_current, int(value)
-        )
-        await self.coordinator.async_request_refresh()
+        try:
+            success = await self.coordinator.hass.async_add_executor_job(
+                self.coordinator.device.write_current, int(value)
+            )
+            if success:
+                self._attr_native_value = value
+                _LOGGER.info("Successfully set charging current to %sA", value)
+                await self.coordinator.async_request_refresh()
+            else:
+                _LOGGER.error("Failed to set charging current")
+        except Exception as e:
+            _LOGGER.exception("Error setting charging current: %s", e)
 
     @property
     def native_value(self):
         """Return the current charging current."""
         if self.coordinator.data is None:
-            return None
-        return self.coordinator.data.get("charging_current")
+            return self._attr_native_value
+        return self.coordinator.data.get("charging_current", self._attr_native_value)
