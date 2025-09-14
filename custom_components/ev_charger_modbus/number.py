@@ -18,7 +18,7 @@ async def async_setup_entry(
     """Set up the EV Charger number platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     device_name = hass.data[DOMAIN][entry.entry_id][CONF_NAME]
-    max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+    max_current = hass.data[DOMAIN][entry.entry_id]["max_current"]  # Use actual max from device
     
     entity = ChargingCurrentNumber(coordinator, device_name, max_current)
     hass.data[DOMAIN][entry.entry_id].setdefault("entities", {})

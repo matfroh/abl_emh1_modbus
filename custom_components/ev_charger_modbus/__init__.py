@@ -114,10 +114,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_info = await hass.async_add_executor_job(lambda: {
         "serial_number": device.read_serial_number(),
         "firmware_info": device.read_firmware_info(),
+        "max_current_from_device": device.read_max_current_setting(),
     })
 
     serial_number = device_info["serial_number"]
     firmware_info = device_info["firmware_info"]
+    
+    # Update device max_current with actual reading from device, fallback to config
+    device_max_current = device_info["max_current_from_device"]
+    if device_max_current:
+        device.max_current = device_max_current
+        _LOGGER.info("Using max current from device: %dA", device_max_current)
+        actual_max_current = device_max_current
+    else:
+        # Fallback to config value if reading fails
+        config_max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+        device.max_current = config_max_current
+        _LOGGER.warning("Could not read max current from device, using config value: %dA", config_max_current)
+        actual_max_current = config_max_current
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -132,7 +146,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.firmware_info = firmware_info  # Store the whole dictionary
     coordinator.firmware_version = firmware_info.get("firmware_version") if firmware_info else None
     coordinator.hardware_version = firmware_info.get("hardware_version") if firmware_info else None
-    coordinator.max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+    coordinator.max_current = actual_max_current
 
     await coordinator.async_config_entry_first_refresh()
 
@@ -141,7 +155,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "device": device,
         "coordinator": coordinator,
         CONF_NAME: device_name,
-        "max_current": entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
+        "max_current": actual_max_current,
         "entities": {},  # Add this to store entities
     }
 
@@ -167,8 +181,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Entity %s not configured", entity_id)
             return
             
-        # Validate against the configured maximum
-        max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+        # Validate against the actual maximum from device
+        max_current = actual_max_current
         if current > max_current:
             _LOGGER.error(
                 "Requested current %d exceeds maximum allowed current %d", 
