@@ -398,43 +398,7 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.error(f"Error checking charging state: {e}")
             return False
- 
-    def read_duty_cycle(self) -> Optional[float]:
-        """Request and parse the duty cycle from the device."""
-        _LOGGER.debug("Starting read_duty_cycle()")
-        try:
-            # Original: ":0103002E0005C9\r\n"
-            response = self.send_raw_command(self._create_raw_command("03002E0005"))
-            if not response:
-                _LOGGER.error("No response received for duty cycle request")
-                return None
-    
-            # Extract the data part after the header
-            # Updated to use dynamic slave_id instead of hardcoded "01"
-            expected_header = f">{self.slave_id:02X}030A2E"
-            header_pos = response.find(expected_header)
-            if header_pos == -1:
-                _LOGGER.error(f"Invalid response format: header '{expected_header}' not found")
-                return None
-    
-            data_start = header_pos + len(expected_header)
-            data_part = response[data_start:]
-            if len(data_part) < 4:
-                _LOGGER.error("Invalid response format: data too short")
-                return None
-    
-            # Extract the duty cycle value
-            duty_cycle_hex = data_part[4:8]  # Corrected byte extraction
-            duty_cycle = int(duty_cycle_hex, 16) / 100.0
-    
-            _LOGGER.info(f"Duty cycle retrieved: {duty_cycle}%")
-            _LOGGER.debug(f"Duty cycle hex: {duty_cycle_hex}")
-            return duty_cycle
-    
-        except Exception as e:
-            _LOGGER.error(f"Error reading duty cycle: {str(e)}")
-            return None
-            
+
     def calculate_consumption_with_duty_cycle(self) -> Optional[float]:
         """Calculate simplified power consumption including duty cycle adjustment."""
         _LOGGER.debug("Starting calculate_consumption_with_duty_cycle()")
@@ -710,7 +674,77 @@ class ModbusASCIIDevice:
         except Exception as e:
             _LOGGER.exception("Error reading max current setting: %s", str(e))
             return None
+
+    def read_duty_cycle(self) -> Optional[float]:
+        """Read duty cycle from register 0x002E as specified in documentation."""
+        _LOGGER.debug("Starting read_duty_cycle()")
+        try:
+            if not self.serial or not self.serial.is_open:
+                _LOGGER.error("Serial port %s is not open", self.port)
+                return None
+
+            # Read from 0x002E with 5 registers as per documentation
+            message = bytes([self.slave_id, 0x03, 0x00, 0x2E, 0x00, 0x05])
+            _LOGGER.debug("Reading full current data with raw message: %s", message.hex().upper())
+
+            lrc = self._calculate_lrc(message)
+            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+            _LOGGER.debug("Sending message: %s", formatted_message)
+
+            self.serial.write(formatted_message)
+            raw_response = self.serial.readline()
+            _LOGGER.debug("Raw response: %s", raw_response)
+
+            response = raw_response.decode(errors="replace").strip()
+            _LOGGER.debug("Decoded response: %s", response)
+
+            # Clean response - remove any non-ASCII characters at the beginning
+            while response and response[0] not in "><0123456789ABCDEF":
+                _LOGGER.debug("Removing invalid character from response start: 0x%04X", ord(response[0]))
+                response = response[1:]
             
+            _LOGGER.debug("Cleaned response: %s", response)
+
+            if not response.startswith(">") or len(response) < 13:
+                _LOGGER.error("Invalid or incomplete response: %s", response)
+                return None
+
+            # Remove the leading ">"
+            stripped_response = response[1:]
+            
+            # Verify LRC
+            lrc_received = stripped_response[-2:]
+            computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
+            _LOGGER.debug("Calculated LRC: %s for message: %s", format(computed_lrc, '02X'), stripped_response[:-2])
+            if format(computed_lrc, '02X') != lrc_received:
+                _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
+                return None
+
+            # Parse the hex data from 5 registers (10 bytes = 20 hex characters)
+            data_part = stripped_response[6:-2]  # Remove header and LRC
+            _LOGGER.debug("Data part: %s (length: %d)", data_part, len(data_part))
+            
+            if len(data_part) != 20:  # Should be exactly 10 bytes (20 hex chars)
+                _LOGGER.error("Unexpected data length: expected 20 chars, got %d: %s", len(data_part), data_part)
+                return None
+
+            # Convert to integer and extract duty cycle
+            complete_data = int(data_part, 16)
+            _LOGGER.debug("Complete 80-bit data: 0x%020X", complete_data)
+            
+            # Extract duty cycle from bits 59-48 (shift by 48 bits, mask 12 bits)
+            duty_cycle_raw = (complete_data >> 48) & 0xFFF
+            _LOGGER.debug("Extracted duty cycle raw value: 0x%03X (%d)", duty_cycle_raw, duty_cycle_raw)
+            
+            # Calculate percentage (raw value 0-1000 maps to 0.0-100.0%)
+            duty_cycle = duty_cycle_raw / 10.0
+            _LOGGER.info("Duty cycle calculated: %.1f%% (raw: %d)", duty_cycle, duty_cycle_raw)
+            
+            return duty_cycle
+
+        except Exception as e:
+            _LOGGER.exception("Error reading duty cycle: %s", str(e))
+            return None
             
     def __del__(self):
         """Clean up serial connection."""
