@@ -347,30 +347,25 @@ class ModbusASCIIDevice:
 
     def write_current(self, current: int) -> bool:
         """Write charging current."""
-        if not 5 <= current <= self.max_current:  # Use instance variable instead of hardcoded value
-            _LOGGER.error(f"Current must be between 5 and {self.max_current}")
+        if current != 0 and not (5 <= current <= self.max_current):
+            _LOGGER.error(f"Current must be 0 or between 5 and {self.max_current}")
             return False
-
         try:
             if current == 0:
                 # Original: ":0110001400010203E8ED\r\n"
                 return self.send_raw_command(self._create_raw_command("10001400010203E8"))
-
             duty_cycle = int(current * 16.6)
             _LOGGER.debug(f"Converting {current}A to duty cycle: {duty_cycle} (0x{duty_cycle:04X})")
-
             message = bytes([
                 self.slave_id, 0x10, 0x00, 0x14, 0x00, 0x01, 0x02, duty_cycle >> 8, duty_cycle & 0xFF
             ])
-
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            
+
             _LOGGER.debug(f"Sending formatted message: {formatted_message}")
             self.serial.write(formatted_message)
             response = self.serial.readline()
             _LOGGER.debug(f"Received raw response: {response}")
-
             # Updated to check for dynamic slave_id instead of hardcoded "01"
             expected_prefix = f">{self.slave_id:02X}100014".encode()
             if expected_prefix in response:
