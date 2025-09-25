@@ -16,6 +16,8 @@
                     "slave": "Slave ID (usually 1)",
                     "baudrate": "Baud Rate (usually 38400)"
                 },
+                "data_description": {
+                },
                 "description": "Set up your EV Charger Modbus connection.",
                 "title": "EV Charger Modbus"
             }

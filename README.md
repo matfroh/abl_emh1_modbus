@@ -2,6 +2,7 @@
 
 
 Allows you to connect the ABL EMH1 charger over RS485 modbus connection to homeassistant and update the max charging current, read sensors and enable or disable the charger. The RS485 connection typically can happen over a USB or any other serial signal converter.
+This extension is also able to detect if the charger is 16A or 32A ready.
 
 
 ## Installation:
@@ -27,7 +28,7 @@ You should now be able to have a new device in the integration. From there, you 
 ## How to test:
 
 Find the service and send the update!
-Select either 0 Amps or any value between 5 and 16
+Select either 0 Amps or any value between 5 and 16 or 32 depending on your hardware.
 ![Set the current in actions](set_current.png)
 
 A switch has been created and can be found in the entities. This enables disabling the charger or enable the charger if it was previously disabled.
@@ -35,8 +36,8 @@ The switch scans the state of the charger to be in the right position.
 Disabling the charger and setting to 0 amperes has some nuances where depending on your use case, one is better fitted.
 ![switch](switch.png)
 
-As well, one can set the charging current with the slider. The default value is 16 amperes. In case of errors, it stays on 16 amperes.
-The charger will only accept values between 5 and 16 and will stop charging on 0.
+As well, one can set the charging current with the slider. The default value is the max amperes of your hardware. In case of errors, it stays on this maximum, either 16 or 32 amperes.
+The charger will only accept values between 5 and 16 or 32 and will stop charging on 0.
 ![Set the current in actions](slider.png)
 
 ---

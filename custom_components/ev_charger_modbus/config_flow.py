@@ -11,9 +11,11 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     DOMAIN,
     CONF_BAUDRATE,
+    CONF_MAX_CURRENT,
     DEFAULT_NAME,
     DEFAULT_SLAVE,
     DEFAULT_BAUDRATE,
+    DEFAULT_MAX_CURRENT,
 )
 from .modbus_device import ModbusASCIIDevice
 
@@ -65,6 +67,17 @@ class EVChargerModbusConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "cannot_connect"
                 else:
                     _LOGGER.debug("Successfully read current value: %s", result)
+                    
+                    # Try to detect max current from device
+                    detected_max_current = await self.hass.async_add_executor_job(device.read_max_current_setting)
+                    if detected_max_current:
+                        _LOGGER.info("Detected max current from device: %dA", detected_max_current)
+                        # Store the detected value in user_input for the entry
+                        user_input[CONF_MAX_CURRENT] = detected_max_current
+                    else:
+                        _LOGGER.warning("Could not detect max current, using default: %dA", DEFAULT_MAX_CURRENT)
+                        user_input[CONF_MAX_CURRENT] = DEFAULT_MAX_CURRENT
+                    
                     # Close the connection after testing
                     try:
                         device.serial.close()

@@ -12,13 +12,17 @@ from homeassistant.helpers.entity import DeviceInfo
 from .const import (
     DOMAIN,
     CONF_BAUDRATE,
+    CONF_MAX_CURRENT,
     DEFAULT_NAME,
     DEFAULT_SLAVE,
     DEFAULT_BAUDRATE,
+    DEFAULT_MAX_CURRENT,
 )
 from .modbus_device import ModbusASCIIDevice
 from datetime import datetime
 import asyncio
+from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
@@ -26,6 +30,19 @@ PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 # Add device specific constants
 MANUFACTURER = "ABL"
 MODEL = "eMH1"
+
+SET_CHARGING_CURRENT_SERVICE = "set_charging_current"
+# Update the service schema to enforce that 'target' (if provided) contains an 'entity_id' as a list of strings
+# Update service schema to accept entity_id as string or a list of strings
+SET_CHARGING_CURRENT_SCHEMA = vol.Schema({
+    vol.Optional("target"): vol.Schema({
+        vol.Required("entity_id"): vol.All(cv.ensure_list, [cv.string])
+    }),
+    vol.Required("current"): vol.All(
+        vol.Coerce(int),
+        vol.Range(min=0, max=32)  # We'll validate the actual max in the handler
+    )
+}, extra=vol.ALLOW_EXTRA)
 
 class EVChargerEntity(CoordinatorEntity):
     """Base class for EV Charger entities."""
@@ -55,13 +72,6 @@ class EVChargerEntity(CoordinatorEntity):
 
         self._attr_device_info = DeviceInfo(**device_info)
         self._attr_has_entity_name = True
-
-SET_CURRENT_SCHEMA = vol.Schema({
-    vol.Required("current"): vol.All(
-        vol.Coerce(int),
-        vol.Range(min=0, max=16)
-    )
-})
 
 async def async_update_data(coordinator, device, device_info, hass):
     """Fetch data from the device."""
@@ -100,6 +110,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         port=entry.data[CONF_PORT],
         slave_id=entry.data.get(CONF_SLAVE, DEFAULT_SLAVE),
         baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
+        max_current=entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
     )
 
     await hass.async_add_executor_job(device.wake_up_device)
@@ -107,10 +118,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     device_info = await hass.async_add_executor_job(lambda: {
         "serial_number": device.read_serial_number(),
         "firmware_info": device.read_firmware_info(),
+        "max_current_from_device": device.read_max_current_setting(),
     })
 
     serial_number = device_info["serial_number"]
     firmware_info = device_info["firmware_info"]
+    
+    # Update device max_current with actual reading from device, fallback to config
+    device_max_current = device_info["max_current_from_device"]
+    if device_max_current:
+        device.max_current = device_max_current
+        _LOGGER.info("Using max current from device: %dA", device_max_current)
+        actual_max_current = device_max_current
+    else:
+        # Fallback to config value if reading fails
+        config_max_current = entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT)
+        device.max_current = config_max_current
+        _LOGGER.warning("Could not read max current from device, using config value: %dA", config_max_current)
+        actual_max_current = config_max_current
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -125,6 +150,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.firmware_info = firmware_info  # Store the whole dictionary
     coordinator.firmware_version = firmware_info.get("firmware_version") if firmware_info else None
     coordinator.hardware_version = firmware_info.get("hardware_version") if firmware_info else None
+    coordinator.max_current = actual_max_current
 
     await coordinator.async_config_entry_first_refresh()
 
@@ -133,24 +159,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "device": device,
         "coordinator": coordinator,
         CONF_NAME: device_name,
+        "max_current": actual_max_current,
+        "entities": {},  # Add this to store entities
     }
 
+    # Update service handler to correctly extract target entity from the service call data
     async def handle_set_charging_current(call: ServiceCall) -> None:
-        """Handle service call to set charging current."""
-        current = call.data["current"]
-        await hass.async_add_executor_job(device.wake_up_device)
-        success = await hass.async_add_executor_job(device.write_current, current)
-        if not success:
-            _LOGGER.error(f"Failed to set charging current to {current}A")
-        else:
-            _LOGGER.info(f"Charging current set to {current}A")
-            await coordinator.async_request_refresh()
+        """Handle setting the charging current."""
+        current = int(call.data["current"])
+        _LOGGER.debug("Service call data: %s", call.data)
+        
+        # Extract entity_ids from "target" key if available, else fallback to top-level "entity_id"
+        entity_ids = []
+        if "target" in call.data and call.data["target"] is not None:
+            target = call.data["target"]
+            if "entity_id" in target:
+                eids = target["entity_id"]
+                if isinstance(eids, list):
+                    entity_ids = eids
+                elif isinstance(eids, str) and eids.strip():
+                    entity_ids = [eids.strip()]
+        
+        if not entity_ids:
+            e = call.data.get("entity_id")
+            if isinstance(e, list):
+                entity_ids = e
+            elif isinstance(e, str) and e.strip():
+                entity_ids = [e.strip()]
+        
+        if not entity_ids:
+            _LOGGER.error("No target specified. Call data: %s", call.data)
+            return
+        
+        # Instead of looking for entities, use the device directly
+        for entry_data in hass.data[DOMAIN].values():
+            device = entry_data["device"]
+            max_current = entry_data["max_current"]
+            if current > max_current:
+                _LOGGER.error(
+                    "Requested current %d exceeds maximum allowed current %d", 
+                    current, max_current
+                )
+                continue
+            try:
+                result = await hass.async_add_executor_job(device.write_current, current)
+                if result:
+                    _LOGGER.info("Successfully set current to %dA", current)
+                else:
+                    _LOGGER.error("Device did not accept current value %dA", current)
+            except Exception as ex:
+                _LOGGER.error("Failed to set current: %s", str(ex))
 
+    # Register the service
     hass.services.async_register(
         DOMAIN,
-        "set_charging_current",
+        SET_CHARGING_CURRENT_SERVICE,
         handle_set_charging_current,
-        schema=SET_CURRENT_SCHEMA,
+        schema=SET_CHARGING_CURRENT_SCHEMA
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
