@@ -17,11 +17,11 @@ set_charging_current:
           domain: number
     current:
       name: Current
-      description: The charging current in amperes (between 5A and max configured amperes)
+      description: The charging current in amperes (0, or between 5A and max configured amperes)
       required: true
       selector:
         number:
-          min: 5
+          min: 0
           max: 32
           step: 1
           unit_of_measurement: A
