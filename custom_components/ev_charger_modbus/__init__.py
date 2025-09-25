@@ -32,13 +32,17 @@ MANUFACTURER = "ABL"
 MODEL = "eMH1"
 
 SET_CHARGING_CURRENT_SERVICE = "set_charging_current"
+# Update the service schema to enforce that 'target' (if provided) contains an 'entity_id' as a list of strings
+# Update service schema to accept entity_id as string or a list of strings
 SET_CHARGING_CURRENT_SCHEMA = vol.Schema({
-    vol.Required("entity_id"): cv.entity_id,
+    vol.Optional("target"): vol.Schema({
+        vol.Required("entity_id"): vol.All(cv.ensure_list, [cv.string])
+    }),
     vol.Required("current"): vol.All(
         vol.Coerce(int),
-        vol.Range(min=5, max=32)  # We'll validate the actual max in the handler
+        vol.Range(min=0, max=32)  # We'll validate the actual max in the handler
     )
-})
+}, extra=vol.ALLOW_EXTRA)
 
 class EVChargerEntity(CoordinatorEntity):
     """Base class for EV Charger entities."""
@@ -159,42 +163,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "entities": {},  # Add this to store entities
     }
 
+    # Update service handler to correctly extract target entity from the service call data
     async def handle_set_charging_current(call: ServiceCall) -> None:
         """Handle setting the charging current."""
-        entity_id = call.data["entity_id"]
         current = int(call.data["current"])
+        _LOGGER.debug("Service call data: %s", call.data)
         
-        # Get the entity from the entity registry
-        entity_registry = er.async_get(hass)
-        entity_entry = entity_registry.async_get(entity_id)
+        # Extract entity_ids from "target" key if available, else fallback to top-level "entity_id"
+        entity_ids = []
+        if "target" in call.data and call.data["target"] is not None:
+            target = call.data["target"]
+            if "entity_id" in target:
+                eids = target["entity_id"]
+                if isinstance(eids, list):
+                    entity_ids = eids
+                elif isinstance(eids, str) and eids.strip():
+                    entity_ids = [eids.strip()]
         
-        if not entity_entry or entity_entry.domain != "number":
-            _LOGGER.error(
-                "Entity %s not found or not a number entity", 
-                entity_id
-            )
+        if not entity_ids:
+            e = call.data.get("entity_id")
+            if isinstance(e, list):
+                entity_ids = e
+            elif isinstance(e, str) and e.strip():
+                entity_ids = [e.strip()]
+        
+        if not entity_ids:
+            _LOGGER.error("No target specified. Call data: %s", call.data)
             return
         
-        # Get the actual entity
-        entity = hass.data[DOMAIN][entry.entry_id]["entities"].get(entity_id)
-        if not entity:
-            _LOGGER.error("Entity %s not configured", entity_id)
-            return
-            
-        # Validate against the actual maximum from device
-        max_current = actual_max_current
-        if current > max_current:
-            _LOGGER.error(
-                "Requested current %d exceeds maximum allowed current %d", 
-                current, 
-                max_current
-            )
-            return
-            
-        try:
-            await entity.async_set_native_value(current)
-        except Exception as ex:
-            _LOGGER.error("Failed to set current: %s", str(ex))
+        # Instead of looking for entities, use the device directly
+        for entry_data in hass.data[DOMAIN].values():
+            device = entry_data["device"]
+            max_current = entry_data["max_current"]
+            if current > max_current:
+                _LOGGER.error(
+                    "Requested current %d exceeds maximum allowed current %d", 
+                    current, max_current
+                )
+                continue
+            try:
+                result = await hass.async_add_executor_job(device.write_current, current)
+                if result:
+                    _LOGGER.info("Successfully set current to %dA", current)
+                else:
+                    _LOGGER.error("Device did not accept current value %dA", current)
+            except Exception as ex:
+                _LOGGER.error("Failed to set current: %s", str(ex))
 
     # Register the service
     hass.services.async_register(
