@@ -3,6 +3,5 @@
   "homeassistant": "2025.1.0",
   "hide_default_branch": true,
   "render_readme": true,
-  "render_readme_filename": "README.md",
   "hacs": "0.19.1"
 }
