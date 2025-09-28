@@ -628,55 +628,67 @@ class ModbusASCIIDevice:
             return None
             
     def read_max_current_setting(self) -> Optional[int]:
-        """Read the maximum current setting from register 0x000F."""
+        """Read the maximum current setting from registers 0x0010-0x0013 (duty cycle).
+        Returns 16A or 32A based on the duty cycle value.
+        """
         _LOGGER.debug("Starting read_max_current_setting()")
         try:
             if not self.serial or not self.serial.is_open:
                 _LOGGER.error("Serial port %s is not open", self.port)
                 return None
 
-            # Read 5 registers starting at 0x000F (same as ABL software)
+            # Read 5 registers starting at 0x000F (as in ABL software)
             message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05])  # Read 5 registers
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            
+
             _LOGGER.debug("Raw message bytes: %s", message.hex().upper())
             _LOGGER.debug("Expected ABL command: 0103000F0005E8")
             _LOGGER.debug("Our command: %s", message.hex().upper() + format(lrc, '02X'))
             _LOGGER.debug("Sending formatted message: %s", formatted_message)
             self.serial.write(formatted_message)
-            
-            # Use the new helper method to read and clean the response
+
+            # Use the helper method to read and clean the response
             response = self._read_response()
             if not response or len(response) < 15:  # Need more data for 5 registers
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
-            # Parse response to get register 15 value (first register in the response)
+            # Parse response
             stripped_response = response[1:]  # Remove '>'
             byte_count = int(stripped_response[4:6], 16)  # Should be 0A (10 bytes)
-            
+
             if byte_count != 10:
                 _LOGGER.error("Unexpected byte count %d, expected 10", byte_count)
                 return None
-            
-            # Extract the first register value (register 0x000F)
+
+            # Extract register values (0x0010-0x0013)
             data_start = 6  # After slave_id(2) + function(2) + byte_count(2)
-            reg15_hex = stripped_response[data_start:data_start+4]  # First 4 hex chars = first register
-            
-            if len(reg15_hex) < 4:
-                _LOGGER.error("Insufficient data for register 15: %s", response)
+            reg10_hex = stripped_response[data_start:data_start+4]  # 0x0010
+
+            if len(reg10_hex) < 4:
+                _LOGGER.error("Insufficient data for register 0x0010: %s", response)
                 return None
-            
-            # Extract register 15 value
-            reg15_value = int(reg15_hex, 16)
-            
-            # Convert to amperage: divide by 244
-            max_current = round(reg15_value / 244.0)
-            
-            _LOGGER.info("Max current setting: %dA (raw value: %d from register 0x000F)", max_current, reg15_value)
+
+            # Convert hex value to integer
+            reg10_value = int(reg10_hex, 16)
+            duty_cycle = reg10_value / 10.0  # Convert to percentage
+
+            # Map duty cycle to 16A or 32A
+            if 26.0 <= duty_cycle <= 27.0:  # 16A (26.6%)
+                max_current = 16
+            elif 53.0 <= duty_cycle <= 54.0:  # 32A (53.3%)
+                max_current = 32
+            else:
+                _LOGGER.error("Unexpected duty cycle: %.1f%% (raw: 0x%04X)", duty_cycle, reg10_value)
+                return None
+
+            _LOGGER.info(
+                "Max current setting: %dA (duty cycle: %.1f%%, raw value: 0x%04X)",
+                max_current, duty_cycle, reg10_value
+            )
             return max_current
-            
+
         except Exception as e:
             _LOGGER.exception("Error reading max current setting: %s", str(e))
             return None
