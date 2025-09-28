@@ -664,7 +664,7 @@ class ModbusASCIIDevice:
 
             # Extract register values (0x0010-0x0013)
             data_start = 6  # After slave_id(2) + function(2) + byte_count(2)
-            reg10_hex = stripped_response[data_start:data_start+4]  # 0x0010
+            reg10_hex = stripped_response[data_start+4:data_start+8]  # 0x0010 (skip 0x000F)
 
             if len(reg10_hex) < 4:
                 _LOGGER.error("Insufficient data for register 0x0010: %s", response)
