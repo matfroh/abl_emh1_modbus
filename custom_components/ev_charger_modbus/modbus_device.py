@@ -1,55 +1,253 @@
 import logging
-from typing import Optional
-import serial
+import re
+from typing import Optional, Tuple
+import asyncio
+import serial_asyncio
 from .constants import STATE_DESCRIPTIONS
 from math import ceil
 
 _LOGGER = logging.getLogger(__name__)
 
-class ModbusASCIIDevice:
-    """Handles communication with the Modbus ASCII device."""
+# --- Transport Layer Abstraction ---
 
-    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200, max_current: int = 16):
-        """Initialize the Modbus ASCII device."""
-        _LOGGER.info("Initializing ModbusASCIIDevice with port %s", port)
-        self.port = port
-        self._state_code = None
-        self.slave_id = slave_id
-        self.max_current = max_current
+class ModbusASCIITransport:
+    """Abstract base class for serial and TCP communication."""
+
+    def __init__(self, port_or_host: str, **kwargs):
+        """Initialize the transport."""
+        self.port_or_host = port_or_host
+        self.is_connected = False
+        self.socket = None
+        self.serial = None
+
+    async def open(self):
+        """Opens the connection."""
+        raise NotImplementedError
+
+    def close(self):
+        """Closes the connection."""
+        raise NotImplementedError
+
+    async def write(self, data: bytes):
+        """Writes data to the connection."""
+        raise NotImplementedError
+
+    async def readline(self) -> bytes:
+        """Reads a line from the connection."""
+        raise NotImplementedError
+
+    @property
+    def is_open(self) -> bool:
+        """Returns whether the connection is open."""
+        return self.is_connected
+
+class SerialTransport(ModbusASCIITransport):
+    """Implementation for local serial connection (RS485)."""
+    
+    def __init__(self, port: str, baudrate: int):
+        super().__init__(port, baudrate=baudrate)
+        self.baudrate = baudrate
+        self.reader = None
+        self.writer = None
+
+    async def open(self):
         try:
-            self.serial = serial.Serial(
-                port=port,
-                baudrate=baudrate,
+            self.reader, self.writer = await serial_asyncio.open_serial_connection(
+                url=self.port_or_host,
+                baudrate=self.baudrate,
                 bytesize=8,
-                parity=serial.PARITY_EVEN,
+                parity='E',
                 stopbits=1,
                 timeout=1
             )
-            _LOGGER.info("Successfully opened serial port %s", port)
-        except serial.SerialException as e:
-            _LOGGER.error("Failed to open serial port %s: %s", port, str(e))
+            self.is_connected = True
+            _LOGGER.info("Successfully opened serial port %s", self.port_or_host)
+        except Exception as e:
+            self.is_connected = False
+            _LOGGER.error("Failed to open serial port %s: %s", self.port_or_host, str(e))
             raise
 
-    def _read_response(self) -> Optional[str]:
-        """Read and clean response from serial port, handling garbage characters."""
+    def close(self):
+        if self.writer and not self.writer.is_closing():
+            self.writer.close()
+            self.is_connected = False
+            _LOGGER.info("Closed serial port %s", self.port_or_host)
+
+    async def write(self, data: bytes):
+        if not self.writer or not self.is_connected:
+            raise ConnectionError("Serial port not open.")
+        self.writer.write(data)
+        await self.writer.drain()
+
+    async def readline(self) -> bytes:
+        if not self.reader or not self.is_connected:
+            return b''
         try:
-            # Read with a reasonable timeout
-            raw_response = self.serial.readline()
+            # Read until we get \r\n (Modbus ASCII terminator)
+            line = await asyncio.wait_for(
+                self.reader.readuntil(b'\r\n'), 
+                timeout=2.0
+            )
+            _LOGGER.debug("Serial read received %d bytes: %s", len(line), line)
+            return line
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Serial read timeout - no response within 2 seconds")
+            return b''
+        except asyncio.IncompleteReadError as e:
+            _LOGGER.warning("Incomplete read: got %d bytes: %s", len(e.partial), e.partial)
+            return e.partial if e.partial else b''
+        except Exception as e:
+            _LOGGER.error("Error reading from serial: %s", e)
+            return b''
+
+    async def reset_input_buffer(self):
+        if self.reader:
+            # A way to clear internal buffer for asyncio reader
+            self.reader.feed_data(b'') 
+
+    @property
+    def is_open(self) -> bool:
+        return self.is_connected and self.writer and not self.writer.is_closing()
+
+
+class TCPTransport(ModbusASCIITransport):
+    """Implementation for Modbus TCP (ASCII over Socket), optimized for EW11."""
+    
+    def __init__(self, host: str, port: int):
+        super().__init__(f"{host}:{port}")
+        self.host = host
+        self.port = port
+        self.timeout = 5.0 # Increased timeout for wallbox delay
+        self.reader = None
+        self.writer = None
+
+    async def open(self):
+        try:
+            _LOGGER.info("Connecting to TCP device at %s:%d (Timeout: %s)", self.host, self.port, self.timeout)
+            self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            self.is_connected = True
+            _LOGGER.info("Successfully connected to TCP device.")
+        except Exception as e:
+            self.is_connected = False
+            _LOGGER.error("Failed to connect to TCP device %s:%d: %s", self.host, self.port, str(e))
+            raise 
+
+    def close(self):
+        if self.writer and not self.writer.is_closing():
+            self.writer.close()
+            self.is_connected = False
+            _LOGGER.info("Closed TCP connection to %s:%d", self.host, self.port)
+
+    async def write(self, data: bytes):
+        if not self.is_connected:
+            raise ConnectionError("TCP connection not open.")
+        self.writer.write(data)
+        await self.writer.drain()
+
+    async def readline(self) -> bytes:
+        """Reads data line by line from the socket, optimized for EW11 gateway delay."""
+        try:
+            # Read until CRLF or timeout
+            buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=1.0)
+
+            # Clean the buffer to start with '>' or ':'
+            if buffer:
+                start_index_gt = buffer.find(b'>')
+                start_index_col = buffer.find(b':')
+                
+                valid_start_index = -1
+                
+                if start_index_gt != -1 and start_index_col != -1:
+                    valid_start_index = min(start_index_gt, start_index_col)
+                elif start_index_gt != -1:
+                    valid_start_index = start_index_gt
+                elif start_index_col != -1:
+                    valid_start_index = start_index_col
+                    
+                if valid_start_index > 0:
+                    _LOGGER.debug(f"Discarding {valid_start_index} leading garbage bytes.")
+                    buffer = buffer[valid_start_index:]
+                elif valid_start_index == -1:
+                     return b'' 
+
+            return buffer
+        except asyncio.TimeoutError:
+            _LOGGER.debug("Socket read timeout reached (end of data stream or incomplete frame).")
+            return b''
+        except Exception as e:
+            _LOGGER.error(f"Error reading from TCP socket: {e}")
+            return b''
+
+    async def reset_input_buffer(self):
+        """With a TCP socket connection, the input buffer is 'cleared' by reading until timeout."""
+        pass 
+
+
+# --- Main Class ModbusASCIIDevice ---
+
+class ModbusASCIIDevice:
+    """Handles communication with the Modbus ASCII device (Serial or TCP)."""
+
+    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200, max_current: int = 16):
+        """Initialize the Modbus ASCII device."""
+        self._state_code = None
+        self.slave_id = slave_id
+        self.max_current = max_current
+        self.port = port
+        self.baudrate = baudrate
+        self.transport: ModbusASCIITransport = None
+
+    async def connect(self):
+        """Connects to the device and initializes the transport."""
+        # Determine connection type (Serial vs. TCP)
+        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$", self.port):
+            # TCP connection (e.g., 192.168.1.10:502)
+            host, tcp_port = self.port.split(":")
+            self.transport = TCPTransport(host, int(tcp_port))
+            _LOGGER.info("Initializing ModbusASCIIDevice with TCP host %s:%s", host, tcp_port)
+        elif self.port.startswith("/dev/") or self.port.startswith("COM"):
+            # Serial connection (e.g., /dev/ttyUSB0 or COM3)
+            self.transport = SerialTransport(self.port, self.baudrate)
+            _LOGGER.info("Initializing ModbusASCIIDevice with serial port %s", self.port)
+        else:
+            _LOGGER.error("Invalid port format: %s. Expected /dev/tty... or IP:PORT", self.port)
+            raise ValueError(f"Invalid port format: {self.port}")
+
+        # Open the connection on startup
+        try:
+            await self.transport.open()
+        except Exception as e:
+            _LOGGER.error("Failed to open communication transport: %s", str(e))
+            raise
+
+    async def _read_response(self) -> Optional[str]:
+        """Read and clean response from serial/tcp port, handling garbage characters."""
+        try:
+            raw_response = await self.transport.readline()
             if not raw_response:
                 return None
                 
             _LOGGER.debug("Raw response bytes: %s", raw_response)
             
             # Decode with error handling
-            response = raw_response.decode(errors="replace").strip()
+            response = raw_response.decode(errors="replace").strip() 
             _LOGGER.debug("Initial decoded response: %s", response)
             
-            # Find the actual start of the Modbus ASCII response (starts with '>')
-            start_pos = response.find('>')
+            # Find the actual start of the Modbus ASCII response (starts with '>' or ':')
+            start_pos_gt = response.find('>')
+            start_pos_col = response.find(':')
+            
+            start_pos = -1
+            if start_pos_gt != -1 and start_pos_col != -1:
+                start_pos = min(start_pos_gt, start_pos_col)
+            elif start_pos_gt != -1:
+                start_pos = start_pos_gt
+            elif start_pos_col != -1:
+                start_pos = start_pos_col
+
             if start_pos == -1:
                 _LOGGER.error("No valid Modbus ASCII start marker found in: %s", response)
-                # Clear buffer on error to prevent corruption
-                self._clear_serial_buffer()
+                await self._clear_input_buffer() 
                 return None
                 
             # Extract the clean response from the start marker
@@ -60,44 +258,30 @@ class ModbusASCIIDevice:
             
         except Exception as e:
             _LOGGER.exception("Error reading response: %s", e)
-            # Clear buffer on error
-            self._clear_serial_buffer()
+            await self._clear_input_buffer()
             return None
 
-    def _clear_serial_buffer(self):
-        """Clear any remaining data in the serial buffer."""
+    async def _clear_input_buffer(self):
+        """Clear any remaining data in the input buffer (Serial/TCP)."""
         try:
-            if self.serial and self.serial.is_open:
-                # Clear input buffer to remove any stale data
-                self.serial.reset_input_buffer()
+            if isinstance(self.transport, SerialTransport):
+                await self.transport.reset_input_buffer()
                 _LOGGER.debug("Cleared serial input buffer")
+            elif isinstance(self.transport, TCPTransport):
+                await self.transport.readline() 
+                _LOGGER.debug("TCP input buffer reset attempt (read until timeout)")
         except Exception as e:
-            _LOGGER.warning("Failed to clear serial buffer: %s", e)
+            _LOGGER.warning("Failed to clear input buffer: %s", str(e))
 
-    # Helper function to create properly formatted Modbus ASCII commands with dynamic slave_id
     def _create_raw_command(self, command_hex: str) -> str:
         """
         Create a raw Modbus ASCII command with the proper slave_id.
-        
-        Args:
-            command_hex: The hex command string without slave_id and without ':' prefix and '\r\n' suffix
-            
-        Returns:
-            Properly formatted command string with slave_id, LRC, and framing
         """
-        # Format slave_id as two hex digits
         slave_id_hex = f"{self.slave_id:02X}"
-        
-        # Replace the first two characters (usually "01") with the proper slave_id
         full_command = slave_id_hex + command_hex
-        
-        # Calculate LRC for the complete command
         message_bytes = bytes.fromhex(full_command)
         lrc = self._calculate_lrc(message_bytes)
-        
-        # Format the complete message with ':' prefix, command, LRC, and CRLF
         formatted_message = f":{full_command}{format(lrc, '02X')}\r\n"
-        
         _LOGGER.debug(f"Created raw command: {formatted_message}")
         return formatted_message
 
@@ -120,11 +304,11 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Getting state description: %s", desc)
         return desc
 
-    def update_state(self) -> bool:
+    async def update_state(self) -> bool:
         """Update the current state from the device."""
         _LOGGER.debug("Starting update_state()")
         try:
-            values = self.read_current()
+            values = await self.read_current()
             _LOGGER.debug("Read values from device: %s", values)
             
             if values and 'state_code' in values:
@@ -144,15 +328,14 @@ class ModbusASCIIDevice:
             _LOGGER.exception("Error updating state: %s", str(e))
             return False
 
-    def read_serial_number(self) -> Optional[str]:
+    async def read_serial_number(self) -> Optional[str]:
         """Read the device serial number."""
         _LOGGER.debug("Starting read_serial_number()")
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
+            if not self.transport.is_open:
+                _LOGGER.error("Transport %s is not open", self.port)
                 return None
 
-            # Command to read serial number (0x0050)
             message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
             _LOGGER.debug("Reading serial number with raw message: %s", message.hex().upper())
 
@@ -160,18 +343,22 @@ class ModbusASCIIDevice:
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             _LOGGER.debug("Sending message: %s", formatted_message)
 
-            self.serial.write(formatted_message)
+            await self.transport.write(formatted_message)
             
-            # Use the new helper method to read and clean the response
-            response = self._read_response()
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+            
+            response = await self._read_response()
             if not response or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
-            # Extract the serial number from the response
-            # Remove the '>' prefix and the CRLF suffix
-            data = response[7:-2]  # Skip >0103xx header and LRC at end
-            serial_number = bytes.fromhex(data).decode('ascii')
+            data = response[7:-2]
+            serial_number = bytes.fromhex(data).decode('ascii', errors='replace')
+            if serial_number and all(c in ('\ufffd', '\xff', '\x00') for c in serial_number):
+                _LOGGER.warning("Serial number appears uninitialized (all 0xFF or 0x00)")
+                return None
+            
             _LOGGER.debug("Decoded serial number: %s", serial_number)
 
             return serial_number
@@ -180,13 +367,12 @@ class ModbusASCIIDevice:
             _LOGGER.exception("Error reading serial number: %s", str(e))
             return None
 
-    def read_all_data(self) -> dict[str, any]:
+    async def read_all_data(self) -> dict[str, any]:
         """Read all available data from the device."""
         _LOGGER.debug("Starting read_all_data()")
         
         try:
-            # Read current values which includes state and currents
-            current_data = self.read_current()
+            current_data = await self.read_current()
             
             if current_data is None:
                 _LOGGER.error("Failed to read data from device")
@@ -195,7 +381,6 @@ class ModbusASCIIDevice:
                     "error": "Failed to read data from device"
                 }
 
-            # Structure the data in a way that's easy for sensors to consume
             data = {
                 "available": True,
                 "state": {
@@ -203,7 +388,7 @@ class ModbusASCIIDevice:
                     "description": current_data["state_description"],
                 },
                 "charging": {
-                    "enabled": self.is_charging_enabled(),
+                    "enabled": await self.is_charging_enabled(),
                     "max_current": current_data["max_current"]
                 },
                 "current_measurements": {
@@ -227,29 +412,12 @@ class ModbusASCIIDevice:
         """Return the raw current value without artificial rounding."""
         if value is None or value > 80:
             return 0
-        return value  # Return the actual value, don't round it up
+        return value
 
-    def read_current(self) -> Optional[dict]:
-        """Read the EV state and current values."""
-        _LOGGER.debug("Starting read_current()")
+    def _process_current_response(self, response: str) -> Optional[dict]:
+        """Parse the Modbus response string for current status and values."""
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
-                return None
-            message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
-            _LOGGER.debug("Reading current with raw message: %s", message.hex().upper())
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            _LOGGER.debug("Sending message: %s", formatted_message)
-            self.serial.write(formatted_message)
-            
-            # Use the new helper method to read and clean the response
-            response = self._read_response()
-            if not response or len(response) < 13:
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
-            
-            # Remove the leading ">"
+            # Remove the leading ">" or ":"
             stripped_response = response[1:]
             
             # Verify LRC
@@ -260,38 +428,26 @@ class ModbusASCIIDevice:
                 _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
                 return None
             
-            # Parse the hex data
-            # Format: 0103063380C20E0E0E57
-            # 01 - Device ID
-            # 03 - Function code
-            # 06 - Byte count
-            # 3380 - First register (status/max current)
-            # C2 - State code
-            # 0E - ICT1 current (14A)
-            # 0E - ICT2 current (14A)
-            # 0E - ICT3 current (14A)
-            # 57 - LRC
-            
             # Extract the data portion after byte count
-            data_part = stripped_response[6:-2]  # '3380C20E0E0E'
+            data_part = stripped_response[6:-2]  
             
             # Extract status register (first 4 chars)
-            status_register = int(data_part[0:4], 16)  # '3380' -> 13184
+            status_register = int(data_part[0:4], 16) 
             
             # Extract state code (next 2 chars)
-            self.state_code = int(data_part[4:6], 16)  # 'C2' -> 194 (0xC2)
+            self.state_code = int(data_part[4:6], 16) 
             state_code_hex = f"0x{self.state_code:02X}"
             state_description = STATE_DESCRIPTIONS.get(self.state_code, "Unknown state")
             
             # Extract current values for each phase (next 6 chars, 2 chars each)
-            ict1 = int(data_part[6:8], 16) if len(data_part) >= 8 else None  # '0E' -> 14
-            ict2 = int(data_part[8:10], 16) if len(data_part) >= 10 else None  # '0E' -> 14
-            ict3 = int(data_part[10:12], 16) if len(data_part) >= 12 else None  # '0E' -> 14
+            ict1 = int(data_part[6:8], 16) if len(data_part) >= 8 else None  
+            ict2 = int(data_part[8:10], 16) if len(data_part) >= 10 else None  
+            ict3 = int(data_part[10:12], 16) if len(data_part) >= 12 else None  
             
             values = {
                 "state_code": state_code_hex,
                 "state_description": state_description,
-                "max_current": status_register / 10.0,  # Adjust if needed based on your protocol
+                "max_current": status_register / 10.0,  
                 "ict1": self.adjust_current_value(ict1) if ict1 is not None else None,
                 "ict2": self.adjust_current_value(ict2) if ict2 is not None else None,
                 "ict3": self.adjust_current_value(ict3) if ict3 is not None else None,
@@ -299,42 +455,75 @@ class ModbusASCIIDevice:
             _LOGGER.info("Read current values: %s", values)
             return values
         except Exception as e:
+            _LOGGER.exception("Error processing current response: %s", str(e))
+            return None
+
+
+    async def read_current(self) -> Optional[dict]:
+        """Read the EV state and current values."""
+        _LOGGER.debug("Starting read_current()")
+        try:
+            if not self.transport.is_open: 
+                _LOGGER.error("Transport %s is not open", self.port)
+                return None
+            
+            message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
+            _LOGGER.debug("Reading current with raw message: %s", message.hex().upper())
+            lrc = self._calculate_lrc(message)
+            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+            _LOGGER.debug("Sending message: %s", formatted_message)
+            
+            await self.transport.write(formatted_message) 
+            
+            # IMPORTANT: Delay after sending (EW11 compensation)
+            await asyncio.sleep(0.5)
+
+            response = await self._read_response()
+            
+            if not response or len(response) < 13: 
+                _LOGGER.error("Invalid or incomplete response: %s", response)
+                return None
+            
+            return self._process_current_response(response)
+
+        except Exception as e:
             _LOGGER.exception("Error reading current: %s", str(e))
             return None
 
-    def send_raw_command(self, command: str) -> Optional[str]:
+    async def send_raw_command(self, command: str) -> Optional[str]:
         """Send a raw command to the device."""
         try:
             _LOGGER.debug(f"Sending raw command: {command}")
-            self.serial.write(command.encode())
+            await self.transport.write(command.encode()) 
             
-            # Use the new helper method to read and clean the response
-            response = self._read_response()
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+            
+            response = await self._read_response()
             if response:
                 _LOGGER.debug(f"Received decoded response: {response}")
-                # Updated to check for dynamic slave_id instead of hardcoded "01"
-                expected_prefix = f">{self.slave_id:02X}"
-                if response.startswith(expected_prefix):
-                    return response  # Return the response
+                expected_prefix_gt = f">{self.slave_id:02X}"
+                expected_prefix_col = f":{self.slave_id:02X}"
+
+                if response.startswith(expected_prefix_gt) or response.startswith(expected_prefix_col):
+                    return response
                 else:
-                    _LOGGER.warning(f"Unexpected response: {response}, expected prefix: {expected_prefix}")
-                    return None  # Unexpected response
+                    _LOGGER.warning(f"Unexpected response: {response}, expected prefix: {expected_prefix_gt} or {expected_prefix_col}")
+                    return None
             else:
-                _LOGGER.warning("No response received from serial port.")
-                return None  # No response
+                _LOGGER.warning("No response received from device.")
+                return None
         except Exception as e:
             _LOGGER.error(f"Error sending raw command: {str(e)}")
-            return None  # Error
-        
-    def enable_charging(self) -> bool:
-        """Enable charging."""
-        # Original: ":01100005000102A1A1A5\r\n"
-        return self.send_raw_command(self._create_raw_command("100005000102A1A1"))
+            return None
 
-    def disable_charging(self) -> bool:
+    async def enable_charging(self) -> bool:
+        """Enable charging."""
+        return await self.send_raw_command(self._create_raw_command("100005000102A1A1"))
+
+    async def disable_charging(self) -> bool:
         """Disable charging."""
-        # Original: ":01100005000102E0E027\r\n"
-        return self.send_raw_command(self._create_raw_command("100005000102E0E0"))
+        return await self.send_raw_command(self._create_raw_command("100005000102E0E0"))
 
     def _calculate_lrc(self, message: bytes) -> int:
         """Calculate LRC for Modbus ASCII message."""
@@ -345,39 +534,38 @@ class ModbusASCIIDevice:
         _LOGGER.debug(f"Calculated LRC: {format(lrc, '02X')} for message: {message.hex().upper()}")
         return lrc
 
-    def write_current(self, current: int) -> bool:
+    async def write_current(self, current: int) -> bool:
         """Write charging current."""
         if current != 0 and not (5 <= current <= self.max_current):
             _LOGGER.error(f"Current must be 0 or between 5 and {self.max_current}")
             return False
-    
+        
         try:
             if current == 0:
-                # Special case: Use the predefined "off" command (duty cycle = 1000)
-                duty_cycle = 1000  # 0x03E8
+                duty_cycle = 1000
             else:
-                # Calculate duty cycle for non-zero currents
                 duty_cycle = int(current * 16.6)
-    
+        
             _LOGGER.debug(f"Setting duty cycle to: {duty_cycle} (0x{duty_cycle:04X}) for {current}A")
-    
-            # Build the Modbus message
+        
             message = bytes([
                 self.slave_id, 0x10, 0x00, 0x14, 0x00, 0x01, 0x02,
-                duty_cycle >> 8,  # High byte
-                duty_cycle & 0xFF # Low byte
+                duty_cycle >> 8, 
+                duty_cycle & 0xFF 
             ])
-    
-            # Calculate LRC and format the message
+        
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-    
+        
             _LOGGER.debug(f"Sending formatted message: {formatted_message}")
-            self.serial.write(formatted_message)
-            response = self.serial.readline()
+            await self.transport.write(formatted_message) 
+            
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+
+            response = await self.transport.readline() 
             _LOGGER.debug(f"Received raw response: {response}")
-    
-            # Check for expected response prefix
+        
             expected_prefix = f">{self.slave_id:02X}100014".encode()
             if expected_prefix in response:
                 _LOGGER.info(f"Successfully set current to {current}A")
@@ -389,11 +577,10 @@ class ModbusASCIIDevice:
             _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
             return False
             
-    def is_charging_enabled(self) -> bool:
+    async def is_charging_enabled(self) -> bool:
         """Check if charging is enabled."""
         try:
-            # Directly access the instance variable for state_code
-            self.update_state()
+            await self.update_state()
             
             if self.state_code in [0xB1, 0xB2, 0xC2]:
                 _LOGGER.debug(f"Charging is enabled. State code: 0x{self.state_code:02X}")
@@ -405,34 +592,29 @@ class ModbusASCIIDevice:
             _LOGGER.error(f"Error checking charging state: {e}")
             return False
 
-    def calculate_consumption_with_duty_cycle(self) -> Optional[float]:
+    async def calculate_consumption_with_duty_cycle(self) -> Optional[float]:
         """Calculate simplified power consumption including duty cycle adjustment."""
         _LOGGER.debug("Starting calculate_consumption_with_duty_cycle()")
         try:
-            # Read current values
-            data = self.read_current()
+            data = await self.read_current()
             if not data:
                 _LOGGER.error("Failed to read current values for power calculation")
                 return None
 
-            # Replace None with 0 and sum ICT values
             ict1 = data.get('ict1', 0)
             ict2 = data.get('ict2', 0)
             ict3 = data.get('ict3', 0)
             total_current = ict1 + ict2 + ict3
 
-            # Retrieve duty cycle
-            duty_cycle = self.read_duty_cycle()
+            duty_cycle = await self.read_duty_cycle()
             if duty_cycle is None:
                 _LOGGER.error("Failed to retrieve duty cycle")
                 return None
 
-            # Calculate simplified power
-            voltage = 230  # Volts
+            voltage = 230
             power = total_current * voltage
 
-            # Apply duty cycle adjustment - ignoring this for now.
-            adjusted_power = power  # * (duty_cycle / 100.0)
+            adjusted_power = power
 
             _LOGGER.info(f"Calculated simplified power consumption (adjusted for duty cycle): {adjusted_power:.2f} Watts")
             _LOGGER.debug(f"Power: {power:.2f} Watts, Duty Cycle: {duty_cycle:.2f}%")
@@ -442,28 +624,24 @@ class ModbusASCIIDevice:
             _LOGGER.error(f"Error calculating power consumption: {str(e)}")
             return None
         
-    def wake_up_device(self) -> bool:
+    async def wake_up_device(self) -> bool:
         """Send wake-up sequence to the device."""
         _LOGGER.info("Attempting to wake up device...")
         
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
+            if not self.transport.is_open:
+                _LOGGER.error("Transport %s is not open", self.port)
                 return False
             
-            # Send wake-up messages in sequence
             wake_up_messages = [":000300010002FA\r\n", ":010300010002F9\r\n", ":010300010002F9\r\n"]
             
             for idx, message in enumerate(wake_up_messages):
                 _LOGGER.debug("Sending wake-up message %d: %s", idx + 1, message.strip())
-                self.serial.write(message.encode())
+                await self.transport.write(message.encode()) 
                 
-                # Small delay between messages
-                import time
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
                 
-                # Read and discard any response
-                response = self.serial.readline()
+                response = await self.transport.readline() 
                 _LOGGER.debug("Response to wake-up message %d: %s", idx + 1, response)
             
             _LOGGER.info("Wake-up sequence completed")
@@ -473,59 +651,48 @@ class ModbusASCIIDevice:
             _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
             return False
 
-    def read_firmware_info(self) -> Optional[dict]:
+    async def read_firmware_info(self) -> Optional[dict]:
         """Read the firmware version and hardware info."""
         _LOGGER.debug("Starting read_firmware_info()")
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
+            if not self.transport.is_open:
+                _LOGGER.error("Transport %s is not open", self.port)
                 return None
                 
-            # Format the Modbus ASCII message for reading registers 0x0001-0x0002
             device_id = format(self.slave_id, '02X')
-            function_code = "03"  # Read registers
-            register_address = "0001"  # Starting address
-            register_count = "0002"  # Number of registers to read
+            function_code = "03" 
+            register_address = "0001"
+            register_count = "0002"
             
-            # Build message without LRC
             message_without_lrc = device_id + function_code + register_address + register_count
-            
-            # Calculate LRC
             lrc = self._calculate_lrc_ascii(message_without_lrc)
-            
-            # Complete message
             formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
             
             _LOGGER.debug("Sending message: %s", formatted_message)
-            self.serial.write(formatted_message)
+            await self.transport.write(formatted_message)
             
-            # Read response using the new helper method
-            response = self._read_response()
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+
+            response = await self._read_response()
             if not response or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
                 
-            # Extract data part (remove '>' prefix and LRC at the end)
             data = response[1:-2]
             
-            # Verify response format (should be like "01030401011237")
             if not data.startswith(device_id + "0304"):
                 _LOGGER.error("Unexpected response format: %s", response)
                 return None
                 
-            # Extract the register values (bytes 5-8 and 9-12)
-            reg1 = int(data[6:10], 16)  # First register value
-            reg2 = int(data[10:14], 16) if len(data) >= 14 else 0  # Second register value
+            reg1 = int(data[6:10], 16) 
+            reg2 = int(data[10:14], 16) if len(data) >= 14 else 0 
             
-            # Extract firmware version (based on documentation)
-            firmware_major = (reg1 >> 8) & 0xFF  # Should be 1
-            firmware_minor = reg1 & 0xFF         # Should be 65 (ASCII 'A')
+            firmware_major = (reg1 >> 8) & 0xFF 
+            firmware_minor = reg1 & 0xFF        
 
-            
-            # Extract hardware version from second register
             hardware_code = (reg2 >> 6) & 0x3
             
-            # Map hardware code to PCBA version
             hardware_versions = {
                 0: "PCBA 141215",
                 1: "PCBA 160307",
@@ -552,156 +719,65 @@ class ModbusASCIIDevice:
     
     def _calculate_lrc_ascii(self, message_hex):
         """Calculate LRC for ASCII Modbus message."""
-        # Convert hex string to bytes
         message_bytes = bytes.fromhex(message_hex)
-        
-        # Calculate LRC (sum all bytes and take two's complement)
         lrc = (-sum(message_bytes)) & 0xFF
-        
-        # Return as hex string
         return format(lrc, '02X')
-
-    def read_serial_number(self) -> Optional[str]:
-        """Read the device serial number."""
-        _LOGGER.debug("Starting read_serial_number()")
-        try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
-                return None
-                
-            # Format the Modbus ASCII message for reading 8 registers starting at 0x0050
-            device_id = format(self.slave_id, '02X')
-            function_code = "03"  # Read registers
-            register_address = "0050"  # Starting address
-            register_count = "0008"  # Number of registers to read
             
-            # Build message without LRC
-            message_without_lrc = device_id + function_code + register_address + register_count
-            
-            # Calculate LRC
-            lrc = self._calculate_lrc_ascii(message_without_lrc)
-            
-            # Complete message
-            formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
-            
-            _LOGGER.debug("Sending message: %s", formatted_message)
-            self.serial.write(formatted_message)
-            
-            # Read response using the new helper method
-            response = self._read_response()
-            if not response or len(response) < 21:  # Minimum expected length for valid response
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
-                
-            # Extract data part (remove '>' prefix and LRC at the end)
-            data = response[1:-2]
-            
-            # Verify response format (should be like "0103105000...")
-            if not data.startswith(device_id + "031050"):
-                _LOGGER.error("Unexpected response format: %s", response)
-                return None
-                
-            # Extract the 16 bytes of serial number data (8 registers = 16 hex characters)
-            serial_data = data[8:]  # Skip device_id + "031050"
-            
-            # Check if all registers are 0xFFFF (no serial number)
-            if all(serial_data[i:i+4] == "FFFF" for i in range(0, len(serial_data), 4)):
-                _LOGGER.debug("No serial number available (all registers are 0xFFFF)")
-                return None
-                
-            # Convert hex values to ASCII characters
-            try:
-                # Based on documentation example, format is like: "2W22xy01234567"
-                serial_bytes = bytes.fromhex(serial_data)
-                serial_number = serial_bytes.decode('ascii', errors='replace')
-                
-                # Remove any null bytes or non-printable characters
-                serial_number = ''.join(char for char in serial_number if char.isprintable())
-                
-                _LOGGER.debug("Decoded serial number: %s", serial_number)
-                return serial_number if serial_number else None
-            except Exception as e:
-                _LOGGER.error("Error decoding serial number data: %s", str(e))
-                return None
-        except Exception as e:
-            _LOGGER.exception("Error reading serial number: %s", str(e))
-            return None
-            
-    def read_max_current_setting(self) -> Optional[int]:
-        """Read the maximum current setting from registers 0x0010-0x0013 (duty cycle).
-        Returns 16A or 32A based on the duty cycle value.
-        """
+    async def read_max_current_setting(self) -> Optional[int]:
+        """Read the maximum current setting from register 0x000F."""
         _LOGGER.debug("Starting read_max_current_setting()")
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
+            if not self.transport.is_open:
+                _LOGGER.error("Transport %s is not open", self.port)
                 return None
 
-            # Read 5 registers starting at 0x000F (as in ABL software)
-            message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05])  # Read 5 registers
+            message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05]) 
             lrc = self._calculate_lrc(message)
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-
-            _LOGGER.debug("Raw message bytes: %s", message.hex().upper())
-            _LOGGER.debug("Expected ABL command: 0103000F0005E8")
-            _LOGGER.debug("Our command: %s", message.hex().upper() + format(lrc, '02X'))
+            
             _LOGGER.debug("Sending formatted message: %s", formatted_message)
-            self.serial.write(formatted_message)
-
-            # Use the helper method to read and clean the response
-            response = self._read_response()
-            if not response or len(response) < 15:  # Need more data for 5 registers
+            await self.transport.write(formatted_message)
+            
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+            
+            response = await self._read_response()
+            if not response or len(response) < 15: 
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
-            # Parse response
-            stripped_response = response[1:]  # Remove '>'
-            byte_count = int(stripped_response[4:6], 16)  # Should be 0A (10 bytes)
-
+            stripped_response = response[1:]
+            byte_count = int(stripped_response[4:6], 16)
+            
             if byte_count != 10:
                 _LOGGER.error("Unexpected byte count %d, expected 10", byte_count)
                 return None
-
-            # Extract register values (0x0010-0x0013)
-            data_start = 6  # After slave_id(2) + function(2) + byte_count(2)
-            reg10_hex = stripped_response[data_start+4:data_start+8]  # 0x0010 (skip 0x000F)
-
-            if len(reg10_hex) < 4:
-                _LOGGER.error("Insufficient data for register 0x0010: %s", response)
+            
+            data_start = 6 
+            reg15_hex = stripped_response[data_start:data_start+4] 
+            
+            if len(reg15_hex) < 4:
+                _LOGGER.error("Insufficient data for register 15: %s", response)
                 return None
-
-            # Convert hex value to integer
-            reg10_value = int(reg10_hex, 16)
-            duty_cycle = reg10_value / 10.0  # Convert to percentage
-
-            # Map duty cycle to 16A or 32A
-            if 26.0 <= duty_cycle <= 27.0:  # 16A (26.6%)
-                max_current = 16
-            elif 53.0 <= duty_cycle <= 54.0:  # 32A (53.3%)
-                max_current = 32
-            else:
-                _LOGGER.error("Unexpected duty cycle: %.1f%% (raw: 0x%04X)", duty_cycle, reg10_value)
-                return None
-
-            _LOGGER.info(
-                "Max current setting: %dA (duty cycle: %.1f%%, raw value: 0x%04X)",
-                max_current, duty_cycle, reg10_value
-            )
+            
+            reg15_value = int(reg15_hex, 16)
+            max_current = round(reg15_value / 244.0)
+            
+            _LOGGER.info("Max current setting: %dA (raw value: %d from register 0x000F)", max_current, reg15_value)
             return max_current
-
+            
         except Exception as e:
             _LOGGER.exception("Error reading max current setting: %s", str(e))
             return None
 
-    def read_duty_cycle(self) -> Optional[float]:
+    async def read_duty_cycle(self) -> Optional[float]:
         """Read duty cycle from register 0x002E as specified in documentation."""
         _LOGGER.debug("Starting read_duty_cycle()")
         try:
-            if not self.serial or not self.serial.is_open:
-                _LOGGER.error("Serial port %s is not open", self.port)
+            if not self.transport.is_open:
+                _LOGGER.error("Transport %s is not open", self.port)
                 return None
 
-            # Read from 0x002E with 5 registers as per documentation
             message = bytes([self.slave_id, 0x03, 0x00, 0x2E, 0x00, 0x05])
             _LOGGER.debug("Reading full current data with raw message: %s", message.hex().upper())
 
@@ -709,52 +785,42 @@ class ModbusASCIIDevice:
             formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             _LOGGER.debug("Sending message: %s", formatted_message)
 
-            self.serial.write(formatted_message)
-            raw_response = self.serial.readline()
+            await self.transport.write(formatted_message)
+            
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+
+            raw_response = await self.transport.readline()
             _LOGGER.debug("Raw response: %s", raw_response)
 
             response = raw_response.decode(errors="replace").strip()
-            _LOGGER.debug("Decoded response: %s", response)
 
-            # Clean response - remove any non-ASCII characters at the beginning
             while response and response[0] not in "><0123456789ABCDEF":
                 _LOGGER.debug("Removing invalid character from response start: 0x%04X", ord(response[0]))
                 response = response[1:]
             
             _LOGGER.debug("Cleaned response: %s", response)
 
-            if not response.startswith(">") or len(response) < 13:
+            if not response.startswith(">") and not response.startswith(":") or len(response) < 13:
                 _LOGGER.error("Invalid or incomplete response: %s", response)
                 return None
 
-            # Remove the leading ">"
             stripped_response = response[1:]
             
-            # Verify LRC
             lrc_received = stripped_response[-2:]
             computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
-            _LOGGER.debug("Calculated LRC: %s for message: %s", format(computed_lrc, '02X'), stripped_response[:-2])
             if format(computed_lrc, '02X') != lrc_received:
                 _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
                 return None
 
-            # Parse the hex data from 5 registers (10 bytes = 20 hex characters)
-            data_part = stripped_response[6:-2]  # Remove header and LRC
-            _LOGGER.debug("Data part: %s (length: %d)", data_part, len(data_part))
+            data_part = stripped_response[6:-2]
             
-            if len(data_part) != 20:  # Should be exactly 10 bytes (20 hex chars)
+            if len(data_part) != 20: 
                 _LOGGER.error("Unexpected data length: expected 20 chars, got %d: %s", len(data_part), data_part)
                 return None
 
-            # Convert to integer and extract duty cycle
             complete_data = int(data_part, 16)
-            _LOGGER.debug("Complete 80-bit data: 0x%020X", complete_data)
-            
-            # Extract duty cycle from bits 59-48 (shift by 48 bits, mask 12 bits)
             duty_cycle_raw = (complete_data >> 48) & 0xFFF
-            _LOGGER.debug("Extracted duty cycle raw value: 0x%03X (%d)", duty_cycle_raw, duty_cycle_raw)
-            
-            # Calculate percentage (raw value 0-1000 maps to 0.0-100.0%)
             duty_cycle = duty_cycle_raw / 10.0
             _LOGGER.info("Duty cycle calculated: %.1f%% (raw: %d)", duty_cycle, duty_cycle_raw)
             
@@ -765,10 +831,9 @@ class ModbusASCIIDevice:
             return None
             
     def __del__(self):
-        """Clean up serial connection."""
+        """Clean up connection."""
         try:
-            if hasattr(self, 'serial') and self.serial.is_open:
-                self.serial.close()
-                _LOGGER.info(f"Closed serial port {self.port}")
+            if self.transport:
+                self.transport.close()
         except Exception as e:
-            _LOGGER.error(f"Error closing serial port: {str(e)}")
+            _LOGGER.error(f"Error closing connection: {str(e)}")

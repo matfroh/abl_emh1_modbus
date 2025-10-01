@@ -79,10 +79,10 @@ async def async_update_data(coordinator, device, device_info, hass):
     last_update = device_info.get("last_update", now)
     if (now - last_update).days > 7:
         _LOGGER.debug("Updating serial number and firmware info (weekly)")
-        updated_info = await hass.async_add_executor_job(lambda: {
-            "serial_number": device.read_serial_number(),
-            "firmware_info": device.read_firmware_info(),
-        })
+        updated_info = {
+            "serial_number": await device.read_serial_number(),
+            "firmware_info": await device.read_firmware_info(),
+        }
         if updated_info["serial_number"]:
             coordinator.serial_number = updated_info["serial_number"]
         if updated_info["firmware_info"]:
@@ -91,11 +91,15 @@ async def async_update_data(coordinator, device, device_info, hass):
         device_info["last_update"] = now
 
     async with async_timeout.timeout(10):
-        data = await hass.async_add_executor_job(device.read_all_data)
+        data = await device.read_all_data()
         if data is None or not data.get("available", False):
             _LOGGER.debug("Device unavailable, trying wake-up")
-            await hass.async_add_executor_job(device.wake_up_device)
-            data = await hass.async_add_executor_job(device.read_all_data)
+            await device.wake_up_device()
+            data = await device.read_all_data()
+            
+        data["duty_cycle"] = await device.read_duty_cycle()
+        data["power_consumption"] = await device.calculate_consumption_with_duty_cycle()
+        
         return data
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -112,14 +116,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         baudrate=entry.data.get(CONF_BAUDRATE, DEFAULT_BAUDRATE),
         max_current=entry.data.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT),
     )
+    
+    await device.connect()
 
-    await hass.async_add_executor_job(device.wake_up_device)
+    await device.wake_up_device()
 
-    device_info = await hass.async_add_executor_job(lambda: {
-        "serial_number": device.read_serial_number(),
-        "firmware_info": device.read_firmware_info(),
-        "max_current_from_device": device.read_max_current_setting(),
-    })
+    device_info = {
+        "serial_number": await device.read_serial_number(),
+        "firmware_info": await device.read_firmware_info(),
+        "max_current_from_device": await device.read_max_current_setting(),
+    }
 
     serial_number = device_info["serial_number"]
     firmware_info = device_info["firmware_info"]

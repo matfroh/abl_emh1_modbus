@@ -88,13 +88,12 @@ class EVChargerDutyCycleSensor(EVChargerEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the duty cycle percentage."""
-        try:
-            duty_cycle = self.coordinator.device.read_duty_cycle()
-            _LOGGER.debug(f"Duty Cycle sensor retrieved: {duty_cycle}")
-            return duty_cycle
-        except Exception as e:
-            _LOGGER.error(f"Error getting duty cycle: {e}")
+        if self.coordinator.data is None:
+            _LOGGER.debug("Coordinator data is None for Duty Cycle sensor.")
             return None
+        value = self.coordinator.data.get("duty_cycle")
+        _LOGGER.debug("Duty Cycle sensor value: %s", value)
+        return value
 
 class EVChargerPowerConsumptionSensor(EVChargerEntity, SensorEntity):
     """Sensor for EV Charger power consumption."""
@@ -110,14 +109,13 @@ class EVChargerPowerConsumptionSensor(EVChargerEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the calculated power consumption."""
-        try:
-            power_consumption = self.coordinator.device.calculate_consumption_with_duty_cycle()
-            _LOGGER.debug(f"Power Consumption sensor retrieved: {power_consumption}")
-            return power_consumption
-        except Exception as e:
-            _LOGGER.error(f"Error getting power consumption: {e}")
+        if self.coordinator.data is None:
+            _LOGGER.debug("Coordinator data is None for Power Consumption sensor.")
             return None
-
+        value = self.coordinator.data.get("power_consumption")
+        _LOGGER.debug("Power Consumption sensor value: %s", value)
+        return value
+        
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the EV Charger sensors."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
