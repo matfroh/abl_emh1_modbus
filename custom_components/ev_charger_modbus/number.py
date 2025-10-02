@@ -35,7 +35,7 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
         
         self._attr_name = "Charging Current"
         self._attr_unique_id = f"{device_name}_charging_current"
-        self._attr_native_min_value = 5
+        self._attr_native_min_value = 0
         self._attr_native_max_value = max_current
         self._attr_native_step = 1
         self._attr_native_value = coordinator.data.get("charging_current", max_current) if coordinator.data else max_current
@@ -50,14 +50,12 @@ class ChargingCurrentNumber(EVChargerEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Set new value."""
         _LOGGER.debug("Setting charging current to: %s", value)
-        if not 5 <= value <= self._attr_native_max_value:
-            _LOGGER.error(f"Current must be between 5 and {self._attr_native_max_value}")
+        if value != 0 and not (5 <= value <= self._attr_native_max_value):
+            _LOGGER.error(f"Current must be 0 or between 5 and {self._attr_native_max_value}")
             return
             
         try:
-            success = await self.coordinator.hass.async_add_executor_job(
-                self.coordinator.device.write_current, int(value)
-            )
+            success = await self.coordinator.device.write_current(int(value))
             if success:
                 self._attr_native_value = value
                 _LOGGER.info("Successfully set charging current to %sA", value)
