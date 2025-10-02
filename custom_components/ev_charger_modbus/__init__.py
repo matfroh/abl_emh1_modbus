@@ -208,7 +208,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 continue
             try:
-                result = await hass.async_add_executor_job(device.write_current, current)
+ #               result = await hass.async_add_executor_job(device.write_current, current)
+                result = await device.write_current(current)
                 if result:
                     _LOGGER.info("Successfully set current to %dA", current)
                 else:
