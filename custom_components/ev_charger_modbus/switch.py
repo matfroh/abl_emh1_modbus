@@ -1,5 +1,6 @@
 """Switch platform for EV Charger Modbus."""
 import logging
+import asyncio
 from typing import Any, Optional
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import CONF_NAME
@@ -66,6 +67,7 @@ class EVChargerSwitch(EVChargerEntity, SwitchEntity):
             success = await self._device.enable_charging()
             if success:
                 _LOGGER.info("Successfully enabled charging")
+                await asyncio.sleep(2)
                 await self.coordinator.async_request_refresh()
             else:
                 _LOGGER.error("Failed to enable charging")
@@ -79,6 +81,7 @@ class EVChargerSwitch(EVChargerEntity, SwitchEntity):
             success = await self._device.disable_charging()
             if success:
                 _LOGGER.info("Successfully disabled charging")
+                await asyncio.sleep(2)
                 await self.coordinator.async_request_refresh()
             else:
                 _LOGGER.error("Failed to disable charging")

@@ -77,6 +77,8 @@ async def async_update_data(coordinator, device, device_info, hass):
     """Fetch data from the device."""
     now = datetime.now()
     last_update = device_info.get("last_update", now)
+    
+    # Weekly update for device info (already correct)
     if (now - last_update).days > 7:
         _LOGGER.debug("Updating serial number and firmware info (weekly)")
         updated_info = {
@@ -86,21 +88,61 @@ async def async_update_data(coordinator, device, device_info, hass):
         if updated_info["serial_number"]:
             coordinator.serial_number = updated_info["serial_number"]
         if updated_info["firmware_info"]:
-            coordinator.firmware_info = updated_info["firmware_info"].get("firmware_version")
+            coordinator.firmware_version = updated_info["firmware_info"].get("firmware_version")
             coordinator.hardware_version = updated_info["firmware_info"].get("hardware_version")
         device_info["last_update"] = now
 
     async with async_timeout.timeout(10):
-        data = await device.read_all_data()
-        if data is None or not data.get("available", False):
+        # Read current data ONCE
+        current_data = await device.read_current()
+        
+        if current_data is None:
             _LOGGER.debug("Device unavailable, trying wake-up")
             await device.wake_up_device()
-            data = await device.read_all_data()
-            
-        data["duty_cycle"] = await device.read_duty_cycle()
-        data["power_consumption"] = await device.calculate_consumption_with_duty_cycle()
+            current_data = await device.read_current()
         
-        return data
+        if current_data is None:
+            return {
+                "available": False,
+                "error": "Failed to read data from device"
+            }
+        
+        # Read duty cycle ONCE
+        duty_cycle = await device.read_duty_cycle()
+        
+        # Calculate power from already-read values (no additional reads)
+        total_current = (current_data.get('ict1', 0) + 
+                        current_data.get('ict2', 0) + 
+                        current_data.get('ict3', 0))
+        power_consumption = total_current * 230  # Simple calculation, no re-reading
+        
+        # Determine charging state from state_code (no additional reads)
+        state_code = current_data.get('state_code')
+        if isinstance(state_code, str) and state_code.startswith('0x'):
+            state_code_int = int(state_code, 16)
+        else:
+            state_code_int = state_code
+        
+        charging_enabled = state_code_int in [0xB1, 0xB2, 0xC2] if state_code_int else False
+        
+        return {
+            "available": True,
+            "state": {
+                "code": current_data["state_code"],
+                "description": current_data["state_description"],
+            },
+            "charging": {
+                "enabled": charging_enabled,
+                "max_current": current_data["max_current"]
+            },
+            "current_measurements": {
+                "ict1": current_data["ict1"],
+                "ict2": current_data["ict2"],
+                "ict3": current_data["ict3"]
+            },
+            "duty_cycle": duty_cycle,
+            "power_consumption": power_consumption
+        }
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the EV Charger Modbus component."""
@@ -148,7 +190,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER,
         name=DOMAIN,
         update_method=lambda: async_update_data(coordinator, device, device_info, hass),
-        update_interval=timedelta(seconds=30),
+        update_interval=timedelta(seconds=15),
     )
 
     coordinator.device = device
