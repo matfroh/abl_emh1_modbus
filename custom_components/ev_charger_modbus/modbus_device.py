@@ -522,13 +522,11 @@ class ModbusASCIIDevice:
 
     async def enable_charging(self) -> bool:
         """Enable charging."""
-        async with self._lock:
-            return await self.send_raw_command(self._create_raw_command("100005000102A1A1"))
+        return await self.send_raw_command(self._create_raw_command("100005000102A1A1"))
 
     async def disable_charging(self) -> bool:
         """Disable charging."""
-        async with self._lock:
-            return await self.send_raw_command(self._create_raw_command("100005000102E0E0"))
+        return await self.send_raw_command(self._create_raw_command("100005000102E0E0"))
 
     def _calculate_lrc(self, message: bytes) -> int:
         """Calculate LRC for Modbus ASCII message."""
