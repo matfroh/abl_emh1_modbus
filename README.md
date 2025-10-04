@@ -1,7 +1,7 @@
 # Home Assistant AddOn for setting max current on ABL EMH1 charger over RS485 MODBUS
 
 
-Allows you to connect the ABL EMH1 charger over RS485 modbus connection or over a TCP/IP to serial converter to homeassistant and update the max charging current, read sensors and enable or disable the charger. The RS485 connection typically can happen over a USB or any other serial signal converter enabled over TCP/IP. Be aware that no support can be offered for configuring such a network device. This code will simply transport the Modbus message to a network enabled Modbus device.
+Allows you to connect the ABL EMH1 charger over RS485 modbus connection or over a TCP/IP to serial converter* to homeassistant and update the max charging current, read sensors and enable or disable the charger. The RS485 connection typically can happen over a USB or any other serial signal converter enabled over TCP/IP. Be aware that no support can be offered for configuring such a network device. This code will simply transport the Modbus message to a network enabled Modbus device.
 This extension is also able to detect if the charger is 16A or 32A ready.
 
 
@@ -40,6 +40,8 @@ As well, one can set the charging current with the slider. The default value is 
 The charger will only accept values between 5 and 16 or 32 and will stop charging on 0.
 ![Set the current in actions](slider.png)
 
+---
+*Modbus over Wifi was tested by one contributor with Elfin EW11 RS485 over Wifi. Please avoid creating issue over connection with devices and use discussion topics to discuss with the community.
 ---
 [add-integration]: https://my.home-assistant.io/redirect/config_flow_start?domain=ev_charger_modbus
 [add-integration-badge]: https://my.home-assistant.io/badges/config_flow_start.svg
