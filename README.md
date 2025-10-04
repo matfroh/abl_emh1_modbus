@@ -42,7 +42,7 @@ The charger will only accept values between 5 and 16 or 32 and will stop chargin
 
 ---
 *Modbus over Wifi was tested by one contributor with Elfin EW11 RS485 over Wifi. Please avoid creating issue over connection with devices and use discussion topics to discuss with the community.
-![Set up your ew11 adapter for Modbus traffic on the right port](ew11_config.png)![](ew11_config.png)
+![Set up your ew11 adapter for Modbus traffic on the right port](ew11_config.png)![](ew11_config2.png)
 
 ![When setting up your connection, enter IP and port directly](ip_port.png)
 
