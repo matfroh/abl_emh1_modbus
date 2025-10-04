@@ -196,6 +196,7 @@ class ModbusASCIIDevice:
         self.port = port
         self.baudrate = baudrate
         self.transport: ModbusASCIITransport = None
+        self._lock = asyncio.Lock()
 
     async def connect(self):
         """Connects to the device and initializes the transport."""
@@ -331,46 +332,46 @@ class ModbusASCIIDevice:
     async def read_serial_number(self) -> Optional[str]:
         """Read the device serial number."""
         _LOGGER.debug("Starting read_serial_number()")
-        try:
-            if not self.transport.is_open:
-                _LOGGER.error("Transport %s is not open", self.port)
+        async with self._lock:
+            try:
+                if not self.transport.is_open:
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return None
+
+                message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
+                _LOGGER.debug("Reading serial number with raw message: %s", message.hex().upper())
+
+                lrc = self._calculate_lrc(message)
+                formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+                _LOGGER.debug("Sending message: %s", formatted_message)
+
+                await self.transport.write(formatted_message)
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
+                
+                response = await self._read_response()
+                if not response or len(response) < 13:
+                    _LOGGER.error("Invalid or incomplete response: %s", response)
+                    return None
+
+                data = response[7:-2]
+                serial_number = bytes.fromhex(data).decode('ascii', errors='replace')
+                if serial_number and all(c in ('\ufffd', '\xff', '\x00') for c in serial_number):
+                    _LOGGER.warning("Serial number appears uninitialized (all 0xFF or 0x00)")
+                    return None
+                
+                _LOGGER.debug("Decoded serial number: %s", serial_number)
+
+                return serial_number
+
+            except Exception as e:
+                _LOGGER.exception("Error reading serial number: %s", str(e))
                 return None
-
-            message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
-            _LOGGER.debug("Reading serial number with raw message: %s", message.hex().upper())
-
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            _LOGGER.debug("Sending message: %s", formatted_message)
-
-            await self.transport.write(formatted_message)
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
-            
-            response = await self._read_response()
-            if not response or len(response) < 13:
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
-
-            data = response[7:-2]
-            serial_number = bytes.fromhex(data).decode('ascii', errors='replace')
-            if serial_number and all(c in ('\ufffd', '\xff', '\x00') for c in serial_number):
-                _LOGGER.warning("Serial number appears uninitialized (all 0xFF or 0x00)")
-                return None
-            
-            _LOGGER.debug("Decoded serial number: %s", serial_number)
-
-            return serial_number
-
-        except Exception as e:
-            _LOGGER.exception("Error reading serial number: %s", str(e))
-            return None
 
     async def read_all_data(self) -> dict[str, any]:
         """Read all available data from the device."""
         _LOGGER.debug("Starting read_all_data()")
-        
         try:
             current_data = await self.read_current()
             
@@ -462,68 +463,72 @@ class ModbusASCIIDevice:
     async def read_current(self) -> Optional[dict]:
         """Read the EV state and current values."""
         _LOGGER.debug("Starting read_current()")
-        try:
-            if not self.transport.is_open: 
-                _LOGGER.error("Transport %s is not open", self.port)
-                return None
-            
-            message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
-            _LOGGER.debug("Reading current with raw message: %s", message.hex().upper())
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            _LOGGER.debug("Sending message: %s", formatted_message)
-            
-            await self.transport.write(formatted_message) 
-            
-            # IMPORTANT: Delay after sending (EW11 compensation)
-            await asyncio.sleep(0.5)
+        async with self._lock:
+            try:
+                if not self.transport.is_open: 
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return None
+                
+                message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
+                _LOGGER.debug("Reading current with raw message: %s", message.hex().upper())
+                lrc = self._calculate_lrc(message)
+                formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+                _LOGGER.debug("Sending message: %s", formatted_message)
+                
+                await self.transport.write(formatted_message) 
+                
+                # IMPORTANT: Delay after sending (EW11 compensation)
+                await asyncio.sleep(0.5)
 
-            response = await self._read_response()
-            
-            if not response or len(response) < 13: 
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
-            
-            return self._process_current_response(response)
+                response = await self._read_response()
+                
+                if not response or len(response) < 13: 
+                    _LOGGER.error("Invalid or incomplete response: %s", response)
+                    return None
+                
+                return self._process_current_response(response)
 
-        except Exception as e:
-            _LOGGER.exception("Error reading current: %s", str(e))
-            return None
+            except Exception as e:
+                _LOGGER.exception("Error reading current: %s", str(e))
+                return None
 
     async def send_raw_command(self, command: str) -> Optional[str]:
         """Send a raw command to the device."""
-        try:
-            _LOGGER.debug(f"Sending raw command: {command}")
-            await self.transport.write(command.encode()) 
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
-            
-            response = await self._read_response()
-            if response:
-                _LOGGER.debug(f"Received decoded response: {response}")
-                expected_prefix_gt = f">{self.slave_id:02X}"
-                expected_prefix_col = f":{self.slave_id:02X}"
+        async with self._lock:
+            try:
+                _LOGGER.debug(f"Sending raw command: {command}")
+                await self.transport.write(command.encode()) 
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
+                
+                response = await self._read_response()
+                if response:
+                    _LOGGER.debug(f"Received decoded response: {response}")
+                    expected_prefix_gt = f">{self.slave_id:02X}"
+                    expected_prefix_col = f":{self.slave_id:02X}"
 
-                if response.startswith(expected_prefix_gt) or response.startswith(expected_prefix_col):
-                    return response
+                    if response.startswith(expected_prefix_gt) or response.startswith(expected_prefix_col):
+                        return response
+                    else:
+                        _LOGGER.warning(f"Unexpected response: {response}, expected prefix: {expected_prefix_gt} or {expected_prefix_col}")
+                        return None
                 else:
-                    _LOGGER.warning(f"Unexpected response: {response}, expected prefix: {expected_prefix_gt} or {expected_prefix_col}")
+                    _LOGGER.warning("No response received from device.")
                     return None
-            else:
-                _LOGGER.warning("No response received from device.")
+            except Exception as e:
+                _LOGGER.error(f"Error sending raw command: {str(e)}")
                 return None
-        except Exception as e:
-            _LOGGER.error(f"Error sending raw command: {str(e)}")
-            return None
 
     async def enable_charging(self) -> bool:
         """Enable charging."""
-        return await self.send_raw_command(self._create_raw_command("100005000102A1A1"))
+        async with self._lock:
+            return await self.send_raw_command(self._create_raw_command("100005000102A1A1"))
 
     async def disable_charging(self) -> bool:
         """Disable charging."""
-        return await self.send_raw_command(self._create_raw_command("100005000102E0E0"))
+        async with self._lock:
+            return await self.send_raw_command(self._create_raw_command("100005000102E0E0"))
 
     def _calculate_lrc(self, message: bytes) -> int:
         """Calculate LRC for Modbus ASCII message."""
@@ -536,46 +541,47 @@ class ModbusASCIIDevice:
 
     async def write_current(self, current: int) -> bool:
         """Write charging current."""
-        if current != 0 and not (5 <= current <= self.max_current):
-            _LOGGER.error(f"Current must be 0 or between 5 and {self.max_current}")
-            return False
-        
-        try:
-            if current == 0:
-                duty_cycle = 1000
-            else:
-                duty_cycle = int(current * 16.6)
-        
-            _LOGGER.debug(f"Setting duty cycle to: {duty_cycle} (0x{duty_cycle:04X}) for {current}A")
-        
-            message = bytes([
-                self.slave_id, 0x10, 0x00, 0x14, 0x00, 0x01, 0x02,
-                duty_cycle >> 8, 
-                duty_cycle & 0xFF 
-            ])
-        
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-        
-            _LOGGER.debug(f"Sending formatted message: {formatted_message}")
-            await self.transport.write(formatted_message) 
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
-
-            response = await self.transport.readline() 
-            _LOGGER.debug(f"Received raw response: {response}")
-        
-            expected_prefix = f">{self.slave_id:02X}100014".encode()
-            if expected_prefix in response:
-                _LOGGER.info(f"Successfully set current to {current}A")
-                return True
-            else:
-                _LOGGER.error(f"Unexpected response when setting current to {current}A: {response}")
+        async with self._lock:
+            if current != 0 and not (5 <= current <= self.max_current):
+                _LOGGER.error(f"Current must be 0 or between 5 and {self.max_current}")
                 return False
-        except Exception as e:
-            _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
-            return False
+            
+            try:
+                if current == 0:
+                    duty_cycle = 1000
+                else:
+                    duty_cycle = int(current * 16.6)
+            
+                _LOGGER.debug(f"Setting duty cycle to: {duty_cycle} (0x{duty_cycle:04X}) for {current}A")
+            
+                message = bytes([
+                    self.slave_id, 0x10, 0x00, 0x14, 0x00, 0x01, 0x02,
+                    duty_cycle >> 8, 
+                    duty_cycle & 0xFF 
+                ])
+            
+                lrc = self._calculate_lrc(message)
+                formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+            
+                _LOGGER.debug(f"Sending formatted message: {formatted_message}")
+                await self.transport.write(formatted_message) 
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
+
+                response = await self.transport.readline() 
+                _LOGGER.debug(f"Received raw response: {response}")
+            
+                expected_prefix = f">{self.slave_id:02X}100014".encode()
+                if expected_prefix in response:
+                    _LOGGER.info(f"Successfully set current to {current}A")
+                    return True
+                else:
+                    _LOGGER.error(f"Unexpected response when setting current to {current}A: {response}")
+                    return False
+            except Exception as e:
+                _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
+                return False
             
     async def is_charging_enabled(self) -> bool:
         """Check if charging is enabled."""
@@ -627,95 +633,96 @@ class ModbusASCIIDevice:
     async def wake_up_device(self) -> bool:
         """Send wake-up sequence to the device."""
         _LOGGER.info("Attempting to wake up device...")
-        
-        try:
-            if not self.transport.is_open:
-                _LOGGER.error("Transport %s is not open", self.port)
+        async with self._lock:
+            try:
+                if not self.transport.is_open:
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return False
+                
+                wake_up_messages = [":000300010002FA\r\n", ":010300010002F9\r\n", ":010300010002F9\r\n"]
+                
+                for idx, message in enumerate(wake_up_messages):
+                    _LOGGER.debug("Sending wake-up message %d: %s", idx + 1, message.strip())
+                    await self.transport.write(message.encode()) 
+                    
+                    await asyncio.sleep(0.5)
+                    
+                    response = await self.transport.readline() 
+                    _LOGGER.debug("Response to wake-up message %d: %s", idx + 1, response)
+                
+                _LOGGER.info("Wake-up sequence completed")
+                return True
+                
+            except Exception as e:
+                _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
                 return False
-            
-            wake_up_messages = [":000300010002FA\r\n", ":010300010002F9\r\n", ":010300010002F9\r\n"]
-            
-            for idx, message in enumerate(wake_up_messages):
-                _LOGGER.debug("Sending wake-up message %d: %s", idx + 1, message.strip())
-                await self.transport.write(message.encode()) 
-                
-                await asyncio.sleep(0.5)
-                
-                response = await self.transport.readline() 
-                _LOGGER.debug("Response to wake-up message %d: %s", idx + 1, response)
-            
-            _LOGGER.info("Wake-up sequence completed")
-            return True
-            
-        except Exception as e:
-            _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
-            return False
 
     async def read_firmware_info(self) -> Optional[dict]:
         """Read the firmware version and hardware info."""
         _LOGGER.debug("Starting read_firmware_info()")
-        try:
-            if not self.transport.is_open:
-                _LOGGER.error("Transport %s is not open", self.port)
-                return None
+        async with self._lock:
+            try:
+                if not self.transport.is_open:
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return None
+                    
+                device_id = format(self.slave_id, '02X')
+                function_code = "03" 
+                register_address = "0001"
+                register_count = "0002"
                 
-            device_id = format(self.slave_id, '02X')
-            function_code = "03" 
-            register_address = "0001"
-            register_count = "0002"
-            
-            message_without_lrc = device_id + function_code + register_address + register_count
-            lrc = self._calculate_lrc_ascii(message_without_lrc)
-            formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
-            
-            _LOGGER.debug("Sending message: %s", formatted_message)
-            await self.transport.write(formatted_message)
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
+                message_without_lrc = device_id + function_code + register_address + register_count
+                lrc = self._calculate_lrc_ascii(message_without_lrc)
+                formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
+                
+                _LOGGER.debug("Sending message: %s", formatted_message)
+                await self.transport.write(formatted_message)
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
 
-            response = await self._read_response()
-            if not response or len(response) < 13:
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
+                response = await self._read_response()
+                if not response or len(response) < 13:
+                    _LOGGER.error("Invalid or incomplete response: %s", response)
+                    return None
+                    
+                data = response[1:-2]
                 
-            data = response[1:-2]
-            
-            if not data.startswith(device_id + "0304"):
-                _LOGGER.error("Unexpected response format: %s", response)
-                return None
+                if not data.startswith(device_id + "0304"):
+                    _LOGGER.error("Unexpected response format: %s", response)
+                    return None
+                    
+                reg1 = int(data[6:10], 16) 
+                reg2 = int(data[10:14], 16) if len(data) >= 14 else 0 
                 
-            reg1 = int(data[6:10], 16) 
-            reg2 = int(data[10:14], 16) if len(data) >= 14 else 0 
-            
-            firmware_major = (reg1 >> 8) & 0xFF 
-            firmware_minor = reg1 & 0xFF        
+                firmware_major = (reg1 >> 8) & 0xFF 
+                firmware_minor = reg1 & 0xFF        
 
-            hardware_code = (reg2 >> 6) & 0x3
-            
-            hardware_versions = {
-                0: "PCBA 141215",
-                1: "PCBA 160307",
-                2: "PCBA 170725",
-                3: "Not Used"
-            }
-            
-            hardware_version = hardware_versions.get(hardware_code, "Unknown")
-            firmware_version = f"V{firmware_major}.{firmware_minor//16}{firmware_minor%16}"
-            
-            _LOGGER.info(
-                "Firmware version: %s, Hardware version: %s (code: %d)",
-                firmware_version, hardware_version, hardware_code
-            )
-            
-            return {
-                "firmware_version": firmware_version,
-                "hardware_version": hardware_version,
-                "raw_registers": [reg1, reg2]
-            }
-        except Exception as e:
-            _LOGGER.exception("Error reading firmware info: %s", str(e))
-            return None
+                hardware_code = (reg2 >> 6) & 0x3
+                
+                hardware_versions = {
+                    0: "PCBA 141215",
+                    1: "PCBA 160307",
+                    2: "PCBA 170725",
+                    3: "Not Used"
+                }
+                
+                hardware_version = hardware_versions.get(hardware_code, "Unknown")
+                firmware_version = f"V{firmware_major}.{firmware_minor//16}{firmware_minor%16}"
+                
+                _LOGGER.info(
+                    "Firmware version: %s, Hardware version: %s (code: %d)",
+                    firmware_version, hardware_version, hardware_code
+                )
+                
+                return {
+                    "firmware_version": firmware_version,
+                    "hardware_version": hardware_version,
+                    "raw_registers": [reg1, reg2]
+                }
+            except Exception as e:
+                _LOGGER.exception("Error reading firmware info: %s", str(e))
+                return None
     
     def _calculate_lrc_ascii(self, message_hex):
         """Calculate LRC for ASCII Modbus message."""
@@ -726,109 +733,111 @@ class ModbusASCIIDevice:
     async def read_max_current_setting(self) -> Optional[int]:
         """Read the maximum current setting from register 0x000F."""
         _LOGGER.debug("Starting read_max_current_setting()")
-        try:
-            if not self.transport.is_open:
-                _LOGGER.error("Transport %s is not open", self.port)
-                return None
+        async with self._lock:
+            try:
+                if not self.transport.is_open:
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return None
 
-            message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05]) 
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            
-            _LOGGER.debug("Sending formatted message: %s", formatted_message)
-            await self.transport.write(formatted_message)
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
-            
-            response = await self._read_response()
-            if not response or len(response) < 15: 
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
+                message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05]) 
+                lrc = self._calculate_lrc(message)
+                formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+                
+                _LOGGER.debug("Sending formatted message: %s", formatted_message)
+                await self.transport.write(formatted_message)
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
+                
+                response = await self._read_response()
+                if not response or len(response) < 15: 
+                    _LOGGER.error("Invalid or incomplete response: %s", response)
+                    return None
 
-            stripped_response = response[1:]
-            byte_count = int(stripped_response[4:6], 16)
-            
-            if byte_count != 10:
-                _LOGGER.error("Unexpected byte count %d, expected 10", byte_count)
+                stripped_response = response[1:]
+                byte_count = int(stripped_response[4:6], 16)
+                
+                if byte_count != 10:
+                    _LOGGER.error("Unexpected byte count %d, expected 10", byte_count)
+                    return None
+                
+                data_start = 6 
+                reg15_hex = stripped_response[data_start:data_start+4] 
+                
+                if len(reg15_hex) < 4:
+                    _LOGGER.error("Insufficient data for register 15: %s", response)
+                    return None
+                
+                reg15_value = int(reg15_hex, 16)
+                max_current = round(reg15_value / 244.0)
+                
+                _LOGGER.info("Max current setting: %dA (raw value: %d from register 0x000F)", max_current, reg15_value)
+                return max_current
+                
+            except Exception as e:
+                _LOGGER.exception("Error reading max current setting: %s", str(e))
                 return None
-            
-            data_start = 6 
-            reg15_hex = stripped_response[data_start:data_start+4] 
-            
-            if len(reg15_hex) < 4:
-                _LOGGER.error("Insufficient data for register 15: %s", response)
-                return None
-            
-            reg15_value = int(reg15_hex, 16)
-            max_current = round(reg15_value / 244.0)
-            
-            _LOGGER.info("Max current setting: %dA (raw value: %d from register 0x000F)", max_current, reg15_value)
-            return max_current
-            
-        except Exception as e:
-            _LOGGER.exception("Error reading max current setting: %s", str(e))
-            return None
 
     async def read_duty_cycle(self) -> Optional[float]:
         """Read duty cycle from register 0x002E as specified in documentation."""
         _LOGGER.debug("Starting read_duty_cycle()")
-        try:
-            if not self.transport.is_open:
-                _LOGGER.error("Transport %s is not open", self.port)
+        async with self._lock:
+            try:
+                if not self.transport.is_open:
+                    _LOGGER.error("Transport %s is not open", self.port)
+                    return None
+
+                message = bytes([self.slave_id, 0x03, 0x00, 0x2E, 0x00, 0x05])
+                _LOGGER.debug("Reading full current data with raw message: %s", message.hex().upper())
+
+                lrc = self._calculate_lrc(message)
+                formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
+                _LOGGER.debug("Sending message: %s", formatted_message)
+
+                await self.transport.write(formatted_message)
+                
+                # IMPORTANT: Delay after sending
+                await asyncio.sleep(0.5)
+
+                raw_response = await self.transport.readline()
+                _LOGGER.debug("Raw response: %s", raw_response)
+
+                response = raw_response.decode(errors="replace").strip()
+
+                while response and response[0] not in "><0123456789ABCDEF":
+                    _LOGGER.debug("Removing invalid character from response start: 0x%04X", ord(response[0]))
+                    response = response[1:]
+                
+                _LOGGER.debug("Cleaned response: %s", response)
+
+                if not response.startswith(">") and not response.startswith(":") or len(response) < 13:
+                    _LOGGER.error("Invalid or incomplete response: %s", response)
+                    return None
+
+                stripped_response = response[1:]
+                
+                lrc_received = stripped_response[-2:]
+                computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
+                if format(computed_lrc, '02X') != lrc_received:
+                    _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
+                    return None
+
+                data_part = stripped_response[6:-2]
+                
+                if len(data_part) != 20: 
+                    _LOGGER.error("Unexpected data length: expected 20 chars, got %d: %s", len(data_part), data_part)
+                    return None
+
+                complete_data = int(data_part, 16)
+                duty_cycle_raw = (complete_data >> 48) & 0xFFF
+                duty_cycle = duty_cycle_raw / 10.0
+                _LOGGER.info("Duty cycle calculated: %.1f%% (raw: %d)", duty_cycle, duty_cycle_raw)
+                
+                return duty_cycle
+
+            except Exception as e:
+                _LOGGER.exception("Error reading duty cycle: %s", str(e))
                 return None
-
-            message = bytes([self.slave_id, 0x03, 0x00, 0x2E, 0x00, 0x05])
-            _LOGGER.debug("Reading full current data with raw message: %s", message.hex().upper())
-
-            lrc = self._calculate_lrc(message)
-            formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
-            _LOGGER.debug("Sending message: %s", formatted_message)
-
-            await self.transport.write(formatted_message)
-            
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
-
-            raw_response = await self.transport.readline()
-            _LOGGER.debug("Raw response: %s", raw_response)
-
-            response = raw_response.decode(errors="replace").strip()
-
-            while response and response[0] not in "><0123456789ABCDEF":
-                _LOGGER.debug("Removing invalid character from response start: 0x%04X", ord(response[0]))
-                response = response[1:]
-            
-            _LOGGER.debug("Cleaned response: %s", response)
-
-            if not response.startswith(">") and not response.startswith(":") or len(response) < 13:
-                _LOGGER.error("Invalid or incomplete response: %s", response)
-                return None
-
-            stripped_response = response[1:]
-            
-            lrc_received = stripped_response[-2:]
-            computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
-            if format(computed_lrc, '02X') != lrc_received:
-                _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
-                return None
-
-            data_part = stripped_response[6:-2]
-            
-            if len(data_part) != 20: 
-                _LOGGER.error("Unexpected data length: expected 20 chars, got %d: %s", len(data_part), data_part)
-                return None
-
-            complete_data = int(data_part, 16)
-            duty_cycle_raw = (complete_data >> 48) & 0xFFF
-            duty_cycle = duty_cycle_raw / 10.0
-            _LOGGER.info("Duty cycle calculated: %.1f%% (raw: %d)", duty_cycle, duty_cycle_raw)
-            
-            return duty_cycle
-
-        except Exception as e:
-            _LOGGER.exception("Error reading duty cycle: %s", str(e))
-            return None
             
     def __del__(self):
         """Clean up connection."""
