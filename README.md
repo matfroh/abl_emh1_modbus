@@ -42,6 +42,10 @@ The charger will only accept values between 5 and 16 or 32 and will stop chargin
 
 ---
 *Modbus over Wifi was tested by one contributor with Elfin EW11 RS485 over Wifi. Please avoid creating issue over connection with devices and use discussion topics to discuss with the community.
+![Set up your ew11 adapter for Modbus traffic on the right port](ew11_config.png)
+
+![When setting up your connection, enter IP and port directly](ip_port.png)
+
 ---
 [add-integration]: https://my.home-assistant.io/redirect/config_flow_start?domain=ev_charger_modbus
 [add-integration-badge]: https://my.home-assistant.io/badges/config_flow_start.svg
