@@ -16,35 +16,37 @@ Add the files to your /custom_components/ folder or use the "+" in the integrati
 6. Place the files you downloaded in the new directory (folder) you created.
 7. Restart Home Assistant.
 8. Add the integration: [![Add Integration][add-integration-badge]][add-integration] or in the HA UI go to "Settings" -> "Devices & Services" then click "+" and search for "EV charger Modbus".
-9. Input the right parameter. Put either the serial device system port or the TCP/IP with port address in the suggested format.
-![Setup](setup.png)
+9. Input the right parameter. Select either the serial device system port or the TCP/IP and then input port or host and port in the suggested format.
+![Select connection](assets/connection_type.png)
+![Serial setup](assets/serial.png)
+![Setup](assets/tcpip.png)
 
 and restart home assistant.
 
 ## Usage:
 You should now be able to have a new device in the integration. From there, you can set the charging rate to 0 or between 5 and 16 Amperes, read the current from the device and completely switch it off and on again.
-![device](device.png)
+![device](assets/device.png)
 
 ## How to test:
 
 Find the service and send the update!
 Select either 0 Amps or any value between 5 and 16 or 32 depending on your hardware.
-![Set the current in actions](set_current.png)
+![Set the current in actions](assets/set_current.png)
 
 A switch has been created and can be found in the entities. This enables disabling the charger or enable the charger if it was previously disabled.
 The switch scans the state of the charger to be in the right position.
 Disabling the charger and setting to 0 amperes has some nuances where depending on your use case, one is better fitted.
-![switch](switch.png)
+![switch](assets/switch.png)
 
 As well, one can set the charging current with the slider. The default value is the max amperes of your hardware. In case of errors, it stays on this maximum, either 16 or 32 amperes.
 The charger will only accept values between 5 and 16 or 32 and will stop charging on 0.
-![Set the current in actions](slider.png)
+![Set the current in actions](assets/slider.png)
 
 ---
 *Modbus over Wifi was tested by one contributor with Elfin EW11 RS485 over Wifi. Please avoid creating issue over connection with devices and use discussion topics to discuss with the community.
-![Set up your ew11 adapter for Modbus traffic on the right port](ew11_config.png)![](ew11_config_2.png)
+![Set up your ew11 adapter for Modbus traffic on the right port](assets/ew11_config.png)![](assets/ew11_config_2.png)
 
-![When setting up your connection, enter IP and port directly](ip_port.png)
+![When setting up your connection, enter IP and port directly](assets/ip_port.png)
 
 ---
 [add-integration]: https://my.home-assistant.io/redirect/config_flow_start?domain=ev_charger_modbus
