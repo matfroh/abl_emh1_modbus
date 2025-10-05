@@ -12,7 +12,7 @@
             "user": {
                 "data": {
                     "name": "Name",
-                    "port": "Serial Port (usually /dev/ttyUSB0)",
+                    "port": "Serial Port or TCP/IP host and port (usually /dev/ttyUSB0 or 192.168.1.100:502)",
                     "slave": "Slave ID (usually 1)",
                     "baudrate": "Baud Rate (usually 38400)"
                 },
