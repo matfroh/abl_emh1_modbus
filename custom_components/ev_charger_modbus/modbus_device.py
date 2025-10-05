@@ -3,7 +3,8 @@ import re
 from typing import Optional, Tuple
 import asyncio
 import serial_asyncio
-from .constants import STATE_DESCRIPTIONS
+from .const import STATE_DESCRIPTIONS, CONF_CONNECTION_TYPE, CONNECTION_TYPE_SERIAL, CONNECTION_TYPE_TCP
+
 from math import ceil
 
 _LOGGER = logging.getLogger(__name__)
@@ -182,39 +183,48 @@ class TCPTransport(ModbusASCIITransport):
         """With a TCP socket connection, the input buffer is 'cleared' by reading until timeout."""
         pass 
 
-
 # --- Main Class ModbusASCIIDevice ---
 
 class ModbusASCIIDevice:
     """Handles communication with the Modbus ASCII device (Serial or TCP)."""
-
-    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200, max_current: int = 16):
+    
+    def __init__(self, port: str, slave_id: int = 1, baudrate: int = 19200, max_current: int = 16, connection_type: str = CONNECTION_TYPE_SERIAL):
         """Initialize the Modbus ASCII device."""
         self._state_code = None
         self.slave_id = slave_id
         self.max_current = max_current
         self.port = port
         self.baudrate = baudrate
+        # Default to serial if not specified (backward compatibility)
+        self.connection_type = connection_type or CONNECTION_TYPE_SERIAL
         self.transport: ModbusASCIITransport = None
         self._lock = asyncio.Lock()
-
+    
     async def connect(self):
         """Connects to the device and initializes the transport."""
-        # Determine connection type (Serial vs. TCP)
-        if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+$", self.port):
-            # TCP connection (e.g., 192.168.1.10:502)
-            host, tcp_port = self.port.split(":")
-            self.transport = TCPTransport(host, int(tcp_port))
-            _LOGGER.info("Initializing ModbusASCIIDevice with TCP host %s:%s", host, tcp_port)
-        elif self.port.startswith("/dev/") or self.port.startswith("COM"):
-            # Serial connection (e.g., /dev/ttyUSB0 or COM3)
+        if self.connection_type == CONNECTION_TYPE_TCP:
+            # TCP connection - port should be in format "host:port"
+            if ":" in self.port:
+                host, tcp_port = self.port.rsplit(":", 1)
+                tcp_port_int = int(tcp_port)
+            else:
+                # Shouldn't happen with proper config flow, but handle gracefully
+                host = self.port
+                tcp_port_int = 502
+            
+            self.transport = TCPTransport(host, tcp_port_int)
+            _LOGGER.info("Initializing ModbusASCIIDevice with TCP connection to %s:%s", host, tcp_port_int)
+        
+        elif self.connection_type == CONNECTION_TYPE_SERIAL:
+            # Serial connection
             self.transport = SerialTransport(self.port, self.baudrate)
-            _LOGGER.info("Initializing ModbusASCIIDevice with serial port %s", self.port)
+            _LOGGER.info("Initializing ModbusASCIIDevice with serial port %s at %d baud", self.port, self.baudrate)
+        
         else:
-            _LOGGER.error("Invalid port format: %s. Expected /dev/tty... or IP:PORT", self.port)
-            raise ValueError(f"Invalid port format: {self.port}")
+            _LOGGER.error("Unknown connection type: %s", self.connection_type)
+            raise ValueError(f"Unknown connection type: {self.connection_type}")
 
-        # Open the connection on startup
+        # Open the connection
         try:
             await self.transport.open()
         except Exception as e:
