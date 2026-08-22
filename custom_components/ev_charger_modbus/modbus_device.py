@@ -2,7 +2,12 @@ import logging
 import re
 from typing import Optional, Tuple
 import asyncio
-import serial_asyncio
+try:
+    # Prefer the maintained fork used in Home Assistant
+    import serial_asyncio_fast as serial_asyncio
+except ImportError:
+    # Fallback for environments that still provide the original package
+    import serial_asyncio  # type: ignore
 from .const import STATE_DESCRIPTIONS, CONF_CONNECTION_TYPE, CONNECTION_TYPE_SERIAL, CONNECTION_TYPE_TCP
 
 from math import ceil
