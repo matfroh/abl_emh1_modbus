@@ -279,7 +279,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         device = hass.data[DOMAIN][entry.entry_id]["device"]
-        if device.serial.is_open:
-            device.serial.close()
+
+        # ModbusASCIIDevice no longer exposes "self.serial" after the
+        # transport-abstraction refactor; the connection (serial OR TCP)
+        # now lives in "self.transport" (SerialTransport / TCPTransport),
+        # which provides an is_open property and a close() method.
+        try:
+            transport = getattr(device, "transport", None)
+            if transport is not None and transport.is_open:
+                transport.close()
+                _LOGGER.debug(
+                    "Closed transport for entry %s during unload", entry.entry_id
+                )
+        except Exception as err:  # pragma: no cover
+            # Don't let a failure while closing the connection abort
+            # the whole unload/reload.
+            _LOGGER.warning(
+                "Error closing connection during unload: %s", err
+            )
+
         hass.data[DOMAIN].pop(entry.entry_id)
     return unload_ok
