@@ -167,9 +167,10 @@ class EVChargerModbusOptionsFlow(config_entries.OptionsFlow):
 
     def __init__(self, config_entry: config_entries.ConfigEntry):
         """Initialize options flow."""
-        self.config_entry = config_entry
+        # Don't assign self.config_entry — the base OptionsFlow class
+        # now manages it as a read-only property.
         self._connection_type = config_entry.data.get(CONF_CONNECTION_TYPE, CONNECTION_TYPE_SERIAL)
-
+    
     async def async_step_init(
         self, user_input: Optional[Dict[str, Any]] = None
     ) -> FlowResult:
