@@ -76,14 +76,25 @@ class SerialTransport(ModbusASCIITransport):
     def close(self):
         if self.writer and not self.writer.is_closing():
             self.writer.close()
-            self.is_connected = False
-            _LOGGER.info("Closed serial port %s", self.port_or_host)
+        self.is_connected = False
+        _LOGGER.info("Closed serial port %s", self.port_or_host)
 
     async def write(self, data: bytes):
         if not self.writer or not self.is_connected:
             raise ConnectionError("Serial port not open.")
-        self.writer.write(data)
-        await self.writer.drain()
+        try:
+            self.writer.write(data)
+            await self.writer.drain()
+        except (OSError, ConnectionError) as e:
+            # NEW: mark the connection as dead so the next call reconnects
+            # instead of writing into a broken pipe forever.
+            _LOGGER.error("Serial write failed, marking connection as closed: %s", e)
+            self.is_connected = False
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+            raise
 
     async def readline(self) -> bytes:
         if not self.reader or not self.is_connected:
@@ -102,6 +113,16 @@ class SerialTransport(ModbusASCIITransport):
         except asyncio.IncompleteReadError as e:
             _LOGGER.warning("Incomplete read: got %d bytes: %s", len(e.partial), e.partial)
             return e.partial if e.partial else b''
+        except (OSError, ConnectionError) as e:
+            # NEW: same reasoning as in write() - a broken pipe/reset means
+            # the connection is dead, not just "no data right now".
+            _LOGGER.error("Serial read failed, marking connection as closed: %s", e)
+            self.is_connected = False
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+            return b''
         except Exception as e:
             _LOGGER.error("Error reading from serial: %s", e)
             return b''
@@ -141,14 +162,28 @@ class TCPTransport(ModbusASCIITransport):
     def close(self):
         if self.writer and not self.writer.is_closing():
             self.writer.close()
-            self.is_connected = False
-            _LOGGER.info("Closed TCP connection to %s:%d", self.host, self.port)
+        self.is_connected = False
+        _LOGGER.info("Closed TCP connection to %s:%d", self.host, self.port)
 
     async def write(self, data: bytes):
         if not self.is_connected:
             raise ConnectionError("TCP connection not open.")
-        self.writer.write(data)
-        await self.writer.drain()
+        try:
+            self.writer.write(data)
+            await self.writer.drain()
+        except (OSError, ConnectionError) as e:
+            # NEW: this is the fix for the Errno 110 loop. Previously
+            # is_connected stayed True after a failed drain(), so every
+            # subsequent poll kept writing into the same dead socket
+            # forever. Now we mark it closed so _ensure_connected() in
+            # ModbusASCIIDevice reopens the connection on the next call.
+            _LOGGER.error("TCP write failed, marking connection as closed: %s", e)
+            self.is_connected = False
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+            raise
 
     async def readline(self) -> bytes:
         """Reads data line by line from the socket, optimized for EW11 gateway delay."""
@@ -180,6 +215,15 @@ class TCPTransport(ModbusASCIITransport):
         except asyncio.TimeoutError:
             _LOGGER.debug("Socket read timeout reached (end of data stream or incomplete frame).")
             return b''
+        except (OSError, ConnectionError, asyncio.IncompleteReadError) as e:
+            # NEW: same reconnect trigger as in write().
+            _LOGGER.error(f"TCP read failed, marking connection as closed: {e}")
+            self.is_connected = False
+            try:
+                self.writer.close()
+            except Exception:
+                pass
+            return b''
         except Exception as e:
             _LOGGER.error(f"Error reading from TCP socket: {e}")
             return b''
@@ -204,6 +248,17 @@ class ModbusASCIIDevice:
         self.connection_type = connection_type or CONNECTION_TYPE_SERIAL
         self.transport: ModbusASCIITransport = None
         self._lock = asyncio.Lock()
+        # NEW: simple backoff guard so a persistently unreachable device
+        # doesn't cause a reconnect attempt on every single poll.
+        self._reconnect_backoff = 5.0
+        self._last_reconnect_attempt = 0.0
+        # NEW: some TCP sessions (e.g. via an RS485-to-Ethernet converter
+        # like the PE11) can go silently stale - the socket stays "open"
+        # from Python's point of view, but the device never answers, and
+        # no OSError is ever raised. Track consecutive empty/invalid
+        # responses so we can force a reconnect even without a hard error.
+        self._consecutive_failures = 0
+        self._max_consecutive_failures = 5
     
     async def connect(self):
         """Connects to the device and initializes the transport."""
@@ -236,11 +291,43 @@ class ModbusASCIIDevice:
             _LOGGER.error("Failed to open communication transport: %s", str(e))
             raise
 
+    async def _ensure_connected(self) -> bool:
+        """NEW: (Re)open the transport if it isn't open.
+
+        This is the actual fix for the Errno 110 loop: every public method
+        below now calls this first instead of just logging an error and
+        giving up when the transport is closed. A small backoff avoids
+        hammering an unreachable PE11/wallbox on every single poll.
+        """
+        if self.transport is not None and self.transport.is_open:
+            return True
+
+        loop = asyncio.get_event_loop()
+        now = loop.time()
+        if now - self._last_reconnect_attempt < self._reconnect_backoff:
+            _LOGGER.debug("Skipping reconnect attempt, still within backoff window.")
+            return False
+        self._last_reconnect_attempt = now
+
+        _LOGGER.warning("Transport for %s not open, attempting to reconnect...", self.port)
+        try:
+            if self.transport is not None:
+                self.transport.close()
+            await self.connect()
+            _LOGGER.info("Reconnected successfully to %s", self.port)
+            return True
+        except Exception as e:
+            _LOGGER.error("Reconnect attempt to %s failed: %s", self.port, str(e))
+            return False
+
     async def _read_response(self) -> Optional[str]:
         """Read and clean response from serial/tcp port, handling garbage characters."""
         try:
             raw_response = await self.transport.readline()
             if not raw_response:
+                # NEW: no bytes at all - counts as a failure even though no
+                # exception was raised (silently stale connection).
+                await self._register_read_failure()
                 return None
                 
             _LOGGER.debug("Raw response bytes: %s", raw_response)
@@ -264,18 +351,48 @@ class ModbusASCIIDevice:
             if start_pos == -1:
                 _LOGGER.error("No valid Modbus ASCII start marker found in: %s", response)
                 await self._clear_input_buffer() 
+                await self._register_read_failure()  # NEW
                 return None
                 
             # Extract the clean response from the start marker
             clean_response = response[start_pos:]
             _LOGGER.debug("Cleaned response: %s", clean_response)
             
+            # NEW: a real, parseable response arrived - the connection is
+            # clearly alive, so reset the stale-connection counter.
+            self._consecutive_failures = 0
             return clean_response
             
         except Exception as e:
             _LOGGER.exception("Error reading response: %s", e)
             await self._clear_input_buffer()
+            await self._register_read_failure()  # NEW
             return None
+
+    async def _register_read_failure(self):
+        """NEW: Track consecutive empty/invalid responses.
+
+        A silently stale TCP session (open socket, no real answers, no
+        OSError) won't trip the error handling added to TCPTransport.write()/
+        readline(). After a few consecutive failures with no successful
+        response in between, force-close the transport so the next call's
+        _ensure_connected() rebuilds the connection from scratch.
+        """
+        self._consecutive_failures += 1
+        _LOGGER.debug(
+            "Consecutive empty/invalid responses: %d/%d",
+            self._consecutive_failures,
+            self._max_consecutive_failures,
+        )
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            _LOGGER.warning(
+                "%d consecutive empty/invalid responses with no socket error - "
+                "connection looks silently stuck, forcing a reconnect.",
+                self._consecutive_failures,
+            )
+            self._consecutive_failures = 0
+            if self.transport is not None:
+                self.transport.close()
 
     async def _clear_input_buffer(self):
         """Clear any remaining data in the input buffer (Serial/TCP)."""
@@ -349,8 +466,7 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Starting read_serial_number()")
         async with self._lock:
             try:
-                if not self.transport.is_open:
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return None
 
                 message = bytes([self.slave_id, 0x03, 0x00, 0x50, 0x00, 0x08])
@@ -380,6 +496,9 @@ class ModbusASCIIDevice:
 
                 return serial_number
 
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error reading serial number: %s", str(e))
+                return None
             except Exception as e:
                 _LOGGER.exception("Error reading serial number: %s", str(e))
                 return None
@@ -480,8 +599,7 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Starting read_current()")
         async with self._lock:
             try:
-                if not self.transport.is_open: 
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return None
                 
                 message = bytes([self.slave_id, 0x03, 0x00, 0x33, 0x00, 0x03])
@@ -503,6 +621,9 @@ class ModbusASCIIDevice:
                 
                 return self._process_current_response(response)
 
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error reading current: %s", str(e))
+                return None
             except Exception as e:
                 _LOGGER.exception("Error reading current: %s", str(e))
                 return None
@@ -511,6 +632,9 @@ class ModbusASCIIDevice:
         """Send a raw command to the device."""
         async with self._lock:
             try:
+                if not await self._ensure_connected():
+                    return None
+
                 _LOGGER.debug(f"Sending raw command: {command}")
                 await self.transport.write(command.encode()) 
                 
@@ -531,6 +655,9 @@ class ModbusASCIIDevice:
                 else:
                     _LOGGER.warning("No response received from device.")
                     return None
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error(f"Connection error sending raw command: {str(e)}")
+                return None
             except Exception as e:
                 _LOGGER.error(f"Error sending raw command: {str(e)}")
                 return None
@@ -560,6 +687,9 @@ class ModbusASCIIDevice:
                 return False
             
             try:
+                if not await self._ensure_connected():
+                    return False
+
                 if current == 0:
                     duty_cycle = 1000
                 else:
@@ -592,6 +722,9 @@ class ModbusASCIIDevice:
                 else:
                     _LOGGER.error(f"Unexpected response when setting current to {current}A: {response}")
                     return False
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error(f"Connection error writing current: {str(e)}")
+                return False
             except Exception as e:
                 _LOGGER.error(f"Error writing current: {str(e)}, type: {type(e)}")
                 return False
@@ -648,8 +781,7 @@ class ModbusASCIIDevice:
         _LOGGER.info("Attempting to wake up device...")
         async with self._lock:
             try:
-                if not self.transport.is_open:
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return False
                 
                 wake_up_messages = [":000300010002FA\r\n", ":010300010002F9\r\n", ":010300010002F9\r\n"]
@@ -666,6 +798,9 @@ class ModbusASCIIDevice:
                 _LOGGER.info("Wake-up sequence completed")
                 return True
                 
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error sending wake-up sequence: %s", str(e))
+                return False
             except Exception as e:
                 _LOGGER.exception("Error sending wake-up sequence: %s", str(e))
                 return False
@@ -675,8 +810,7 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Starting read_firmware_info()")
         async with self._lock:
             try:
-                if not self.transport.is_open:
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return None
                     
                 device_id = format(self.slave_id, '02X')
@@ -733,6 +867,9 @@ class ModbusASCIIDevice:
                     "hardware_version": hardware_version,
                     "raw_registers": [reg1, reg2]
                 }
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error reading firmware info: %s", str(e))
+                return None
             except Exception as e:
                 _LOGGER.exception("Error reading firmware info: %s", str(e))
                 return None
@@ -748,8 +885,7 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Starting read_max_current_setting()")
         async with self._lock:
             try:
-                if not self.transport.is_open:
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return None
 
                 message = bytes([self.slave_id, 0x03, 0x00, 0x0F, 0x00, 0x05]) 
@@ -787,6 +923,9 @@ class ModbusASCIIDevice:
                 _LOGGER.info("Max current setting: %dA (raw value: %d from register 0x000F)", max_current, reg15_value)
                 return max_current
                 
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error reading max current setting: %s", str(e))
+                return None
             except Exception as e:
                 _LOGGER.exception("Error reading max current setting: %s", str(e))
                 return None
@@ -796,8 +935,7 @@ class ModbusASCIIDevice:
         _LOGGER.debug("Starting read_duty_cycle()")
         async with self._lock:
             try:
-                if not self.transport.is_open:
-                    _LOGGER.error("Transport %s is not open", self.port)
+                if not await self._ensure_connected():
                     return None
 
                 message = bytes([self.slave_id, 0x03, 0x00, 0x2E, 0x00, 0x05])
@@ -825,6 +963,7 @@ class ModbusASCIIDevice:
 
                 if not response.startswith(">") and not response.startswith(":") or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
+                    await self._register_read_failure()  # NEW
                     return None
 
                 stripped_response = response[1:]
@@ -833,7 +972,11 @@ class ModbusASCIIDevice:
                 computed_lrc = self._calculate_lrc(bytes.fromhex(stripped_response[:-2]))
                 if format(computed_lrc, '02X') != lrc_received:
                     _LOGGER.error("LRC mismatch: computed=%02X, received=%s", computed_lrc, lrc_received)
+                    await self._register_read_failure()  # NEW
                     return None
+
+                # NEW: parsed successfully - connection is alive.
+                self._consecutive_failures = 0
 
                 data_part = stripped_response[6:-2]
                 
@@ -848,6 +991,9 @@ class ModbusASCIIDevice:
                 
                 return duty_cycle
 
+            except (OSError, ConnectionError) as e:
+                _LOGGER.error("Connection error reading duty cycle: %s", str(e))
+                return None
             except Exception as e:
                 _LOGGER.exception("Error reading duty cycle: %s", str(e))
                 return None
