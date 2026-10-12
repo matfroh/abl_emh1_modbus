@@ -22,7 +22,7 @@ STATE_DESCRIPTIONS = {
     0xA1: "Waiting for EV",
     0xB1: "EV is asking for charging",
     0xB2: "EV has the permission to charge",
-    0xC2: "EV is charged",
+    0xC2: "EV is charging",
     0xC3: "C2, reduced current (error F16, F17)",
     0xC4: "C2, reduced current (imbalance F15)",
     0xE0: "Outlet disabled",
