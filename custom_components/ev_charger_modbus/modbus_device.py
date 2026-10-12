@@ -453,6 +453,31 @@ class ModbusASCIIDevice:
                         function_code, f"0x{register:04X}" if register is not None else None)
         return None
 
+    async def _request(
+        self,
+        formatted_message: bytes,
+        function_code: int,
+        byte_count: Optional[int] = None,
+        register: Optional[int] = None,
+        echo: bool = False,
+    ) -> Optional[str]:
+        """Send a request and return the matching reply, retrying once.
+
+        The ABL goes to sleep after roughly 10-15 s without traffic; the
+        first frame after that only wakes it up and is never answered.
+        Resending once is safe for both reads and register writes.
+        """
+        for attempt in range(2):
+            await self._send(formatted_message)
+            # IMPORTANT: Delay after sending
+            await asyncio.sleep(0.5)
+            response = await self._read_reply(function_code, byte_count, register, echo)
+            if response is not None:
+                return response
+            if attempt == 0:
+                _LOGGER.debug("No reply, device probably asleep - resending request once")
+        return None
+
     async def _register_read_failure(self):
         """NEW: Track consecutive empty/invalid responses.
 
@@ -556,12 +581,7 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
 
-                await self._send(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self._read_reply(0x03, byte_count=16)
+                response = await self._request(formatted_message, 0x03, byte_count=16)
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
@@ -693,12 +713,7 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
                 
-                await self._send(formatted_message) 
-                
-                # IMPORTANT: Delay after sending (EW11 compensation)
-                await asyncio.sleep(0.5)
-
-                response = await self._read_reply(0x03, byte_count=6, register=0x0033, echo=True)
+                response = await self._request(formatted_message, 0x03, byte_count=6, register=0x0033, echo=True)
 
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
@@ -721,15 +736,10 @@ class ModbusASCIIDevice:
                     return None
 
                 _LOGGER.debug(f"Sending raw command: {command}")
-                await self._send(command.encode()) 
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-                
                 # Raw commands look like ":<id><fc><register>...", match the reply on fc and register
                 function_code = int(command[3:5], 16)
                 register = int(command[5:9], 16)
-                response = await self._read_reply(function_code, register=register)
+                response = await self._request(command.encode(), function_code, register=register)
                 if response:
                     _LOGGER.debug(f"Received decoded response: {response}")
                     expected_prefix_gt = f">{self.slave_id:02X}"
@@ -795,12 +805,7 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             
                 _LOGGER.debug(f"Sending formatted message: {formatted_message}")
-                await self._send(formatted_message) 
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self._read_reply(0x10, register=0x0014)
+                response = await self._request(formatted_message, 0x10, register=0x0014)
                 _LOGGER.debug(f"Received raw response: {response}")
 
                 if response:
@@ -907,12 +912,7 @@ class ModbusASCIIDevice:
                 formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
                 
                 _LOGGER.debug("Sending message: %s", formatted_message)
-                await self._send(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self._read_reply(0x03, byte_count=4)
+                response = await self._request(formatted_message, 0x03, byte_count=4)
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
@@ -977,12 +977,7 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 
                 _LOGGER.debug("Sending formatted message: %s", formatted_message)
-                await self._send(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-                
-                response = await self._read_reply(0x03, byte_count=10)
+                response = await self._request(formatted_message, 0x03, byte_count=10)
                 if not response or len(response) < 15:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
@@ -1029,12 +1024,7 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
 
-                await self._send(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self._read_reply(0x03, byte_count=10, register=0x002E, echo=True)
+                response = await self._request(formatted_message, 0x03, byte_count=10, register=0x002E, echo=True)
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
