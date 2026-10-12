@@ -399,7 +399,7 @@ class ModbusASCIIDevice:
 
         Read replies (0x03) must carry the expected byte count; with
         ``echo`` the first data byte must repeat the low byte of the start
-        register, as the ABL does for 0x000F, 0x002E and 0x0033. Write
+        register, as the ABL does for 0x002E and 0x0033. Write
         replies (0x10) must repeat the start register.
         """
         body = response[1:]
@@ -977,7 +977,7 @@ class ModbusASCIIDevice:
                 # IMPORTANT: Delay after sending
                 await asyncio.sleep(0.5)
                 
-                response = await self._read_reply(0x03, byte_count=10, register=0x000F, echo=True)
+                response = await self._read_reply(0x03, byte_count=10)
                 if not response or len(response) < 15:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
