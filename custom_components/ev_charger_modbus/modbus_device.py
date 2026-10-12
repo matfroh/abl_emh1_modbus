@@ -206,7 +206,8 @@ class TCPTransport(ModbusASCIITransport):
         """Reads data line by line from the socket, optimized for EW11 gateway delay."""
         try:
             # Read until CRLF or timeout
-            buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=1.0)
+            # The ABL answers within ~50 ms via the gateway; missing replies are resent by the caller
+            buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=0.3)
 
             # Clean the buffer to start with '>' or ':'
             if buffer:
@@ -461,21 +462,23 @@ class ModbusASCIIDevice:
         register: Optional[int] = None,
         echo: bool = False,
     ) -> Optional[str]:
-        """Send a request and return the matching reply, retrying once.
+        """Send a request and return the matching reply, resending if needed.
 
-        The ABL goes to sleep after roughly 10-15 s without traffic; the
-        first frame after that only wakes it up and is never answered.
-        Resending once is safe for both reads and register writes.
+        The ABL occasionally drops a frame without answering (after idle
+        periods and shortly after write commands). Replies normally arrive
+        within ~50 ms, so a short read timeout plus a resend is much faster
+        than waiting. Resending is safe for both reads and register writes.
+        No fixed delay after sending: readline() already waits for the
+        complete frame.
         """
-        for attempt in range(2):
+        attempts = 3
+        for attempt in range(1, attempts + 1):
             await self._send(formatted_message)
-            # IMPORTANT: Delay after sending
-            await asyncio.sleep(0.5)
             response = await self._read_reply(function_code, byte_count, register, echo)
             if response is not None:
                 return response
-            if attempt == 0:
-                _LOGGER.debug("No reply, device probably asleep - resending request once")
+            if attempt < attempts:
+                _LOGGER.debug("No reply (attempt %d/%d), resending request", attempt, attempts)
         return None
 
     async def _register_read_failure(self):
