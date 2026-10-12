@@ -108,9 +108,8 @@ async def async_update_data(coordinator, device, device_info, hass):
         duty_cycle = await device.read_duty_cycle()
         
         # Calculate power from already-read values (no additional reads)
-        total_current = (current_data.get('ict1', 0) + 
-                        current_data.get('ict2', 0) + 
-                        current_data.get('ict3', 0))
+        # ict values can be None for short frames, .get() defaults don't cover that
+        total_current = sum((current_data.get(k) or 0) for k in ('ict1', 'ict2', 'ict3'))
         power_consumption = total_current * 230  # Simple calculation, no re-reading
         
         # Determine charging state from state_code (no additional reads)
@@ -120,8 +119,10 @@ async def async_update_data(coordinator, device, device_info, hass):
         else:
             state_code_int = state_code
         
-        charging_enabled = state_code_int in [0xB1, 0xB2, 0xC2] if state_code_int else False
-        
+        # The outlet is enabled in every A/B/C state (A1 = enabled, no car yet);
+        # E0 means disabled, E*/F* are setup and error states
+        charging_enabled = state_code_int is not None and (state_code_int >> 4) in (0xA, 0xB, 0xC)
+
         return {
             "available": True,
             "state": {

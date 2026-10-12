@@ -60,6 +60,12 @@ class EVChargerSwitch(EVChargerEntity, SwitchEntity):
         # Get charging state from device
         return self.coordinator.data.get("charging", {}).get("enabled", False)
 
+    def _set_enabled(self, enabled: bool) -> None:
+        """Show a write the device confirmed right away, until the refresh reads it back."""
+        if self.coordinator.data is not None:
+            self.coordinator.data.setdefault("charging", {})["enabled"] = enabled
+        self.async_write_ha_state()
+
     async def async_turn_on(self, **kwargs):
         """Turn on charging."""
         _LOGGER.info("Attempting to turn on charging")
@@ -67,6 +73,7 @@ class EVChargerSwitch(EVChargerEntity, SwitchEntity):
             success = await self._device.enable_charging()
             if success:
                 _LOGGER.info("Successfully enabled charging")
+                self._set_enabled(True)
                 await asyncio.sleep(2)
                 await self.coordinator.async_request_refresh()
             else:
@@ -81,6 +88,7 @@ class EVChargerSwitch(EVChargerEntity, SwitchEntity):
             success = await self._device.disable_charging()
             if success:
                 _LOGGER.info("Successfully disabled charging")
+                self._set_enabled(False)
                 await asyncio.sleep(2)
                 await self.coordinator.async_request_refresh()
             else:

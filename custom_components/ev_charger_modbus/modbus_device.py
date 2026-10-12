@@ -42,6 +42,28 @@ class ModbusASCIITransport:
         """Reads a line from the connection."""
         raise NotImplementedError
 
+    async def reset_input_buffer(self):
+        """Discard any bytes that are already waiting in the reader.
+
+        A reply that arrives after its read timed out stays in the buffer
+        and would otherwise be taken as the answer to the next request,
+        shifting every following read by one.
+        """
+        reader = getattr(self, "reader", None)
+        if not reader or not self.is_connected:
+            return
+        discarded = b''
+        while True:
+            try:
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=0.05)
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                break
+            discarded += chunk
+        if discarded:
+            _LOGGER.debug("Discarded stale input before request: %s", discarded)
+
     @property
     def is_open(self) -> bool:
         """Returns whether the connection is open."""
@@ -127,11 +149,6 @@ class SerialTransport(ModbusASCIITransport):
             _LOGGER.error("Error reading from serial: %s", e)
             return b''
 
-    async def reset_input_buffer(self):
-        if self.reader:
-            # A way to clear internal buffer for asyncio reader
-            self.reader.feed_data(b'') 
-
     @property
     def is_open(self) -> bool:
         return self.is_connected and self.writer and not self.writer.is_closing()
@@ -189,6 +206,9 @@ class TCPTransport(ModbusASCIITransport):
         """Reads data line by line from the socket, optimized for EW11 gateway delay."""
         try:
             # Read until CRLF or timeout
+            # The ABL answers in ~0.1 s when busy but takes ~0.6 s after idle periods
+            # or writes; a fast reply returns immediately, so this only bounds the
+            # wait for a reply that never comes (the caller then resends)
             buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=1.0)
 
             # Clean the buffer to start with '>' or ':'
@@ -227,10 +247,6 @@ class TCPTransport(ModbusASCIITransport):
         except Exception as e:
             _LOGGER.error(f"Error reading from TCP socket: {e}")
             return b''
-
-    async def reset_input_buffer(self):
-        """With a TCP socket connection, the input buffer is 'cleared' by reading until timeout."""
-        pass 
 
 # --- Main Class ModbusASCIIDevice ---
 
@@ -369,6 +385,107 @@ class ModbusASCIIDevice:
             await self._register_read_failure()  # NEW
             return None
 
+    async def _send(self, formatted_message: bytes):
+        """Drop stale input, then send a request."""
+        await self._clear_input_buffer()
+        await self.transport.write(formatted_message)
+
+    def _response_matches(
+        self,
+        response: str,
+        function_code: int,
+        byte_count: Optional[int] = None,
+        register: Optional[int] = None,
+        echo: bool = False,
+    ) -> bool:
+        """Check that a response frame answers the request it is read for.
+
+        Read replies (0x03) must carry the expected byte count; with
+        ``echo`` the first data byte must repeat the low byte of the start
+        register, as the ABL does for 0x002E and 0x0033. Write
+        replies (0x10) must repeat the start register.
+        """
+        body = response[1:]
+        if len(body) < 8 or len(body) % 2:
+            return False
+        try:
+            frame = bytes.fromhex(body)
+        except ValueError:
+            return False
+        if self._calculate_lrc(frame[:-1]) != frame[-1]:
+            return False
+        if frame[0] != self.slave_id or frame[1] != function_code:
+            return False
+        if function_code == 0x03:
+            data = frame[3:-1]
+            if byte_count is not None and (frame[2] != byte_count or len(data) != byte_count):
+                return False
+            if echo and register is not None and (not data or data[0] != register & 0xFF):
+                return False
+        elif function_code == 0x10 and register is not None:
+            if int.from_bytes(frame[2:4], "big") != register:
+                return False
+        return True
+
+    async def _read_reply(
+        self,
+        function_code: int,
+        byte_count: Optional[int] = None,
+        register: Optional[int] = None,
+        echo: bool = False,
+        max_frames: int = 3,
+    ) -> Optional[str]:
+        """Read frames until one answers the current request.
+
+        Frames that belong to an earlier request (late replies) are skipped
+        instead of being parsed as if they were the answer to this one.
+        """
+        for _ in range(max_frames):
+            response = await self._read_response()
+            if response is None:
+                return None
+            if self._response_matches(response, function_code, byte_count, register, echo):
+                return response
+            _LOGGER.debug(
+                "Skipping frame that does not match request (fc=0x%02X, bytes=%s, reg=%s): %s",
+                function_code, byte_count,
+                f"0x{register:04X}" if register is not None else None,
+                response,
+            )
+        _LOGGER.warning("No matching response for request (fc=0x%02X, reg=%s)",
+                        function_code, f"0x{register:04X}" if register is not None else None)
+        return None
+
+    async def _request(
+        self,
+        formatted_message: bytes,
+        function_code: int,
+        byte_count: Optional[int] = None,
+        register: Optional[int] = None,
+        echo: bool = False,
+    ) -> Optional[str]:
+        """Send a request and return the matching reply, resending if needed.
+
+        Replies take ~0.1 s, or ~0.6 s after idle periods and writes; now and
+        then one never comes, so the request is resent after the read
+        timeout. Resending is safe for both reads and register writes.
+        No fixed delay after sending: readline() already waits for the
+        complete frame.
+        """
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            # The stale-connection guard may have closed the transport after
+            # repeated timeouts; reopen it instead of writing into a closed socket
+            if not await self._ensure_connected():
+                return None
+            await self._send(formatted_message)
+            response = await self._read_reply(function_code, byte_count, register, echo)
+            if response is not None:
+                return response
+            if attempt < attempts:
+                _LOGGER.debug("No reply (attempt %d/%d), resending request", attempt, attempts)
+        return None
+
     async def _register_read_failure(self):
         """NEW: Track consecutive empty/invalid responses.
 
@@ -397,12 +514,8 @@ class ModbusASCIIDevice:
     async def _clear_input_buffer(self):
         """Clear any remaining data in the input buffer (Serial/TCP)."""
         try:
-            if isinstance(self.transport, SerialTransport):
+            if self.transport is not None:
                 await self.transport.reset_input_buffer()
-                _LOGGER.debug("Cleared serial input buffer")
-            elif isinstance(self.transport, TCPTransport):
-                await self.transport.readline() 
-                _LOGGER.debug("TCP input buffer reset attempt (read until timeout)")
         except Exception as e:
             _LOGGER.warning("Failed to clear input buffer: %s", str(e))
 
@@ -476,20 +589,21 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
 
-                await self.transport.write(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-                
-                response = await self._read_response()
+                response = await self._request(formatted_message, 0x03, byte_count=16)
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
 
-                data = response[7:-2]
-                serial_number = bytes.fromhex(data).decode('ascii', errors='replace')
-                if serial_number and all(c in ('\ufffd', '\xff', '\x00') for c in serial_number):
+                data = bytes.fromhex(response[7:-2])
+                # The ABL repeats the register address (0x50) in the first data byte
+                if data and data[0] == 0x50:
+                    data = data[1:]
+                if not data or all(b in (0x00, 0xFF) for b in data):
                     _LOGGER.warning("Serial number appears uninitialized (all 0xFF or 0x00)")
+                    return None
+                # Drop NUL padding and the trailing spaces the device pads with
+                serial_number = data.decode('ascii', errors='replace').replace('\x00', '').strip()
+                if not serial_number:
                     return None
                 
                 _LOGGER.debug("Decoded serial number: %s", serial_number)
@@ -566,9 +680,6 @@ class ModbusASCIIDevice:
             # Extract the data portion after byte count
             data_part = stripped_response[6:-2]  
             
-            # Extract status register (first 4 chars)
-            status_register = int(data_part[0:4], 16) 
-            
             # Extract state code (next 2 chars)
             self.state_code = int(data_part[4:6], 16) 
             state_code_hex = f"0x{self.state_code:02X}"
@@ -582,7 +693,9 @@ class ModbusASCIIDevice:
             values = {
                 "state_code": state_code_hex,
                 "state_description": state_description,
-                "max_current": status_register / 10.0,  
+                # The first word is the register echo plus status bits, not a current;
+                # report the max current read from register 0x000F instead
+                "max_current": self.max_current,
                 "ict1": self.adjust_current_value(ict1) if ict1 is not None else None,
                 "ict2": self.adjust_current_value(ict2) if ict2 is not None else None,
                 "ict3": self.adjust_current_value(ict3) if ict3 is not None else None,
@@ -608,14 +721,9 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
                 
-                await self.transport.write(formatted_message) 
-                
-                # IMPORTANT: Delay after sending (EW11 compensation)
-                await asyncio.sleep(0.5)
+                response = await self._request(formatted_message, 0x03, byte_count=6, register=0x0033, echo=True)
 
-                response = await self._read_response()
-                
-                if not response or len(response) < 13: 
+                if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
                 
@@ -636,12 +744,10 @@ class ModbusASCIIDevice:
                     return None
 
                 _LOGGER.debug(f"Sending raw command: {command}")
-                await self.transport.write(command.encode()) 
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-                
-                response = await self._read_response()
+                # Raw commands look like ":<id><fc><register>...", match the reply on fc and register
+                function_code = int(command[3:5], 16)
+                register = int(command[5:9], 16)
+                response = await self._request(command.encode(), function_code, register=register)
                 if response:
                     _LOGGER.debug(f"Received decoded response: {response}")
                     expected_prefix_gt = f">{self.slave_id:02X}"
@@ -707,16 +813,10 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
             
                 _LOGGER.debug(f"Sending formatted message: {formatted_message}")
-                await self.transport.write(formatted_message) 
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self.transport.readline() 
+                response = await self._request(formatted_message, 0x10, register=0x0014)
                 _LOGGER.debug(f"Received raw response: {response}")
-            
-                expected_prefix = f">{self.slave_id:02X}100014".encode()
-                if expected_prefix in response:
+
+                if response:
                     _LOGGER.info(f"Successfully set current to {current}A")
                     return True
                 else:
@@ -734,7 +834,7 @@ class ModbusASCIIDevice:
         try:
             await self.update_state()
             
-            if self.state_code in [0xB1, 0xB2, 0xC2]:
+            if self.state_code is not None and (self.state_code >> 4) in (0xA, 0xB, 0xC):
                 _LOGGER.debug(f"Charging is enabled. State code: 0x{self.state_code:02X}")
                 return True
             else:
@@ -753,10 +853,7 @@ class ModbusASCIIDevice:
                 _LOGGER.error("Failed to read current values for power calculation")
                 return None
 
-            ict1 = data.get('ict1', 0)
-            ict2 = data.get('ict2', 0)
-            ict3 = data.get('ict3', 0)
-            total_current = ict1 + ict2 + ict3
+            total_current = sum((data.get(k) or 0) for k in ('ict1', 'ict2', 'ict3'))
 
             duty_cycle = await self.read_duty_cycle()
             if duty_cycle is None:
@@ -788,7 +885,7 @@ class ModbusASCIIDevice:
                 
                 for idx, message in enumerate(wake_up_messages):
                     _LOGGER.debug("Sending wake-up message %d: %s", idx + 1, message.strip())
-                    await self.transport.write(message.encode()) 
+                    await self._send(message.encode()) 
                     
                     await asyncio.sleep(0.5)
                     
@@ -823,16 +920,11 @@ class ModbusASCIIDevice:
                 formatted_message = f":{message_without_lrc}{lrc}\r\n".encode()
                 
                 _LOGGER.debug("Sending message: %s", formatted_message)
-                await self.transport.write(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                response = await self._read_response()
+                response = await self._request(formatted_message, 0x03, byte_count=4)
                 if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
-                    
+
                 data = response[1:-2]
                 
                 if not data.startswith(device_id + "0304"):
@@ -893,13 +985,8 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 
                 _LOGGER.debug("Sending formatted message: %s", formatted_message)
-                await self.transport.write(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-                
-                response = await self._read_response()
-                if not response or len(response) < 15: 
+                response = await self._request(formatted_message, 0x03, byte_count=10)
+                if not response or len(response) < 15:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
 
@@ -945,25 +1032,9 @@ class ModbusASCIIDevice:
                 formatted_message = b':' + message.hex().upper().encode() + format(lrc, '02X').encode() + b'\r\n'
                 _LOGGER.debug("Sending message: %s", formatted_message)
 
-                await self.transport.write(formatted_message)
-                
-                # IMPORTANT: Delay after sending
-                await asyncio.sleep(0.5)
-
-                raw_response = await self.transport.readline()
-                _LOGGER.debug("Raw response: %s", raw_response)
-
-                response = raw_response.decode(errors="replace").strip()
-
-                while response and response[0] not in "><0123456789ABCDEF":
-                    _LOGGER.debug("Removing invalid character from response start: 0x%04X", ord(response[0]))
-                    response = response[1:]
-                
-                _LOGGER.debug("Cleaned response: %s", response)
-
-                if not response.startswith(">") and not response.startswith(":") or len(response) < 13:
+                response = await self._request(formatted_message, 0x03, byte_count=10, register=0x002E, echo=True)
+                if not response or len(response) < 13:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
-                    await self._register_read_failure()  # NEW
                     return None
 
                 stripped_response = response[1:]
