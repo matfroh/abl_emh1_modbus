@@ -108,9 +108,8 @@ async def async_update_data(coordinator, device, device_info, hass):
         duty_cycle = await device.read_duty_cycle()
         
         # Calculate power from already-read values (no additional reads)
-        total_current = (current_data.get('ict1', 0) + 
-                        current_data.get('ict2', 0) + 
-                        current_data.get('ict3', 0))
+        # ict values can be None for short frames, .get() defaults don't cover that
+        total_current = sum((current_data.get(k) or 0) for k in ('ict1', 'ict2', 'ict3'))
         power_consumption = total_current * 230  # Simple calculation, no re-reading
         
         # Determine charging state from state_code (no additional reads)
