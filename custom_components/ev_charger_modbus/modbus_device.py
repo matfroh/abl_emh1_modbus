@@ -206,8 +206,10 @@ class TCPTransport(ModbusASCIITransport):
         """Reads data line by line from the socket, optimized for EW11 gateway delay."""
         try:
             # Read until CRLF or timeout
-            # The ABL answers within ~50 ms via the gateway; missing replies are resent by the caller
-            buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=0.3)
+            # The ABL answers in ~0.1 s when busy but takes ~0.6 s after idle periods
+            # or writes; a fast reply returns immediately, so this only bounds the
+            # wait for a reply that never comes (the caller then resends)
+            buffer = await asyncio.wait_for(self.reader.readuntil(b'\r\n'), timeout=1.0)
 
             # Clean the buffer to start with '>' or ':'
             if buffer:
@@ -464,15 +466,18 @@ class ModbusASCIIDevice:
     ) -> Optional[str]:
         """Send a request and return the matching reply, resending if needed.
 
-        The ABL occasionally drops a frame without answering (after idle
-        periods and shortly after write commands). Replies normally arrive
-        within ~50 ms, so a short read timeout plus a resend is much faster
-        than waiting. Resending is safe for both reads and register writes.
+        Replies take ~0.1 s, or ~0.6 s after idle periods and writes; now and
+        then one never comes, so the request is resent after the read
+        timeout. Resending is safe for both reads and register writes.
         No fixed delay after sending: readline() already waits for the
         complete frame.
         """
         attempts = 3
         for attempt in range(1, attempts + 1):
+            # The stale-connection guard may have closed the transport after
+            # repeated timeouts; reopen it instead of writing into a closed socket
+            if not await self._ensure_connected():
+                return None
             await self._send(formatted_message)
             response = await self._read_reply(function_code, byte_count, register, echo)
             if response is not None:
