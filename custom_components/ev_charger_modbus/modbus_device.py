@@ -566,10 +566,16 @@ class ModbusASCIIDevice:
                     _LOGGER.error("Invalid or incomplete response: %s", response)
                     return None
 
-                data = response[7:-2]
-                serial_number = bytes.fromhex(data).decode('ascii', errors='replace')
-                if serial_number and all(c in ('\ufffd', '\xff', '\x00') for c in serial_number):
+                data = bytes.fromhex(response[7:-2])
+                # The ABL repeats the register address (0x50) in the first data byte
+                if data and data[0] == 0x50:
+                    data = data[1:]
+                if not data or all(b in (0x00, 0xFF) for b in data):
                     _LOGGER.warning("Serial number appears uninitialized (all 0xFF or 0x00)")
+                    return None
+                # Drop NUL padding and the trailing spaces the device pads with
+                serial_number = data.decode('ascii', errors='replace').replace('\x00', '').strip()
+                if not serial_number:
                     return None
                 
                 _LOGGER.debug("Decoded serial number: %s", serial_number)
@@ -646,9 +652,6 @@ class ModbusASCIIDevice:
             # Extract the data portion after byte count
             data_part = stripped_response[6:-2]  
             
-            # Extract status register (first 4 chars)
-            status_register = int(data_part[0:4], 16) 
-            
             # Extract state code (next 2 chars)
             self.state_code = int(data_part[4:6], 16) 
             state_code_hex = f"0x{self.state_code:02X}"
@@ -662,7 +665,9 @@ class ModbusASCIIDevice:
             values = {
                 "state_code": state_code_hex,
                 "state_description": state_description,
-                "max_current": status_register / 10.0,  
+                # The first word is the register echo plus status bits, not a current;
+                # report the max current read from register 0x000F instead
+                "max_current": self.max_current,
                 "ict1": self.adjust_current_value(ict1) if ict1 is not None else None,
                 "ict2": self.adjust_current_value(ict2) if ict2 is not None else None,
                 "ict3": self.adjust_current_value(ict3) if ict3 is not None else None,
