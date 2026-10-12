@@ -119,8 +119,10 @@ async def async_update_data(coordinator, device, device_info, hass):
         else:
             state_code_int = state_code
         
-        charging_enabled = state_code_int in [0xB1, 0xB2, 0xC2] if state_code_int else False
-        
+        # The outlet is enabled in every A/B/C state (A1 = enabled, no car yet);
+        # E0 means disabled, E*/F* are setup and error states
+        charging_enabled = state_code_int is not None and (state_code_int >> 4) in (0xA, 0xB, 0xC)
+
         return {
             "available": True,
             "state": {

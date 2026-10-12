@@ -829,7 +829,7 @@ class ModbusASCIIDevice:
         try:
             await self.update_state()
             
-            if self.state_code in [0xB1, 0xB2, 0xC2]:
+            if self.state_code is not None and (self.state_code >> 4) in (0xA, 0xB, 0xC):
                 _LOGGER.debug(f"Charging is enabled. State code: 0x{self.state_code:02X}")
                 return True
             else:
